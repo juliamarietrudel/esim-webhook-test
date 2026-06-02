@@ -15,9 +15,12 @@ export function shopifyGraphqlUrl() {
   return `https://${shop}/admin/api/${version}/graphql.json`;
 }
 
+let cachedShopifyAccessToken = null;
+let cachedShopifyAccessTokenExpiresAt = 0;
+
 export async function shopifyGraphql(query, variables = {}) {
   const url = shopifyGraphqlUrl();
-  const token = shopifyToken();
+  const token = await shopifyToken();
 
   const resp = await safeFetch(url, {
     method: "POST",
@@ -38,10 +41,42 @@ export async function shopifyGraphql(query, variables = {}) {
   return json;
 }
 
-function shopifyToken() {
-  const token = process.env.API_ACCESS_TOKEN;
-  if (!token) throw new Error("Missing API_ACCESS_TOKEN env var");
-  return token;
+async function shopifyToken() {
+  const staticToken = (process.env.API_ACCESS_TOKEN || "").trim();
+  if (staticToken) return staticToken;
+
+  if (cachedShopifyAccessToken && Date.now() < cachedShopifyAccessTokenExpiresAt - 60_000) {
+    return cachedShopifyAccessToken;
+  }
+
+  const shop = (process.env.SHOPIFY_SHOP_DOMAIN || "").trim();
+  const clientId = (process.env.SHOPIFY_CLIENT_ID || "").trim();
+  const clientSecret = (process.env.SHOPIFY_CLIENT_SECRET || "").trim();
+
+  if (!shop) throw new Error("Missing SHOPIFY_SHOP_DOMAIN env var");
+  if (!clientId || !clientSecret) {
+    throw new Error("Missing API_ACCESS_TOKEN or SHOPIFY_CLIENT_ID/SHOPIFY_CLIENT_SECRET env vars");
+  }
+
+  const resp = await safeFetch(`https://${shop}/admin/oauth/access_token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "client_credentials",
+      client_id: clientId,
+      client_secret: clientSecret,
+    }),
+  });
+
+  const json = await parseJsonSafe(resp);
+  if (!resp.ok || !json?.access_token) {
+    console.error("Shopify token exchange failed:", { status: resp.status, json });
+    throw new Error(json?.error_description || json?.error || `Shopify token exchange failed (${resp.status})`);
+  }
+
+  cachedShopifyAccessToken = json.access_token;
+  cachedShopifyAccessTokenExpiresAt = Date.now() + Number(json.expires_in || 86399) * 1000;
+  return cachedShopifyAccessToken;
 }
 
 async function parseJsonSafe(resp) {
@@ -51,7 +86,7 @@ async function parseJsonSafe(resp) {
 // ---------- Variant config ----------
 export async function getVariantConfig(variantId) {
   const url = shopifyGraphqlUrl();
-  const token = shopifyToken();
+  const token = await shopifyToken();
 
   const gid = `gid://shopify/ProductVariant/${variantId}`;
 
@@ -86,6 +121,179 @@ export async function getVariantConfig(variantId) {
   const productType = (v?.productType?.value || "").trim().toLowerCase() || null;
 
   return { mayaPlanId, productType };
+}
+
+// ---------- Telna variant config ----------
+export async function getTelnaVariantConfig(variantId) {
+  const gid = `gid://shopify/ProductVariant/${variantId}`;
+
+  const query = `
+    query ($id: ID!) {
+      productVariant(id: $id) {
+        id
+        telnaPackageTemplateId: metafield(namespace: "custom", key: "telna_package_template_id") { value }
+        productType: metafield(namespace: "custom", key: "type_de_produit") { value }
+      }
+    }
+  `;
+
+  const json = await shopifyGraphql(query, { id: gid });
+  const v = json?.data?.productVariant;
+  const telnaPackageTemplateId =
+    (v?.telnaPackageTemplateId?.value || process.env.TELNA_DEFAULT_PACKAGE_TEMPLATE_ID || "").trim() || null;
+  const productType = (v?.productType?.value || "").trim().toLowerCase() || null;
+
+  return { telnaPackageTemplateId, productType };
+}
+
+// ---------- Telna order/customer metafields ----------
+export async function getTelnaIccidFromShopifyCustomer(shopifyCustomerId) {
+  if (!shopifyCustomerId) return null;
+
+  const gid = `gid://shopify/Customer/${shopifyCustomerId}`;
+  const query = `
+    query ($id: ID!) {
+      customer(id: $id) {
+        telnaIccid: metafield(namespace: "custom", key: "telna_iccid") { value }
+      }
+    }
+  `;
+
+  const json = await shopifyGraphql(query, { id: gid });
+  return (json?.data?.customer?.telnaIccid?.value || "").trim() || null;
+}
+
+export async function saveTelnaIccidToShopifyCustomer(shopifyCustomerId, iccid) {
+  const value = String(iccid || "").trim();
+  if (!shopifyCustomerId || !value) return true;
+
+  const gid = `gid://shopify/Customer/${shopifyCustomerId}`;
+  const mutation = `
+    mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
+      metafieldsSet(metafields: $metafields) {
+        userErrors { field message }
+      }
+    }
+  `;
+
+  const json = await shopifyGraphql(mutation, {
+    metafields: [
+      {
+        ownerId: gid,
+        namespace: "custom",
+        key: "telna_iccid",
+        type: "single_line_text_field",
+        value,
+      },
+    ],
+  });
+
+  const userErrors = json?.data?.metafieldsSet?.userErrors || [];
+  if (userErrors.length) {
+    throw new Error(userErrors[0]?.message || "Failed to write telna_iccid on customer");
+  }
+
+  return true;
+}
+
+export async function getTelnaOrderProcessedFlag(orderId) {
+  const gid = `gid://shopify/Order/${orderId}`;
+  const query = `
+    query ($id: ID!) {
+      order(id: $id) {
+        id
+        processed: metafield(namespace: "custom", key: "telna_processed") { value }
+        processedAt: metafield(namespace: "custom", key: "telna_processed_at") { value }
+      }
+    }
+  `;
+
+  const json = await shopifyGraphql(query, { id: gid });
+  const order = json?.data?.order;
+  if (!order) return { processed: false, processedAt: null };
+
+  return {
+    processed: String(order?.processed?.value || "").trim().toLowerCase() === "true",
+    processedAt: order?.processedAt?.value || null,
+  };
+}
+
+export async function markTelnaOrderProcessed(orderId) {
+  const gid = `gid://shopify/Order/${orderId}`;
+  const nowIso = new Date().toISOString();
+  const mutation = `
+    mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
+      metafieldsSet(metafields: $metafields) {
+        userErrors { field message }
+      }
+    }
+  `;
+
+  const json = await shopifyGraphql(mutation, {
+    metafields: [
+      { ownerId: gid, namespace: "custom", key: "telna_processed", type: "boolean", value: "true" },
+      { ownerId: gid, namespace: "custom", key: "telna_processed_at", type: "date_time", value: nowIso },
+    ],
+  });
+
+  const userErrors = json?.data?.metafieldsSet?.userErrors || [];
+  if (userErrors.length) {
+    throw new Error(userErrors[0]?.message || "Failed to mark Telna order processed");
+  }
+
+  return true;
+}
+
+export async function saveTelnaProvisioningToOrder(orderId, {
+  iccid,
+  packageId,
+  packageTemplateId,
+  activationCode,
+  euiccState,
+} = {}) {
+  if (!orderId) throw new Error("saveTelnaProvisioningToOrder: missing orderId");
+
+  const gid = `gid://shopify/Order/${orderId}`;
+  const metafields = [];
+  const add = (key, value, type = "single_line_text_field") => {
+    const cleanValue = String(value || "").trim();
+    if (!cleanValue) return;
+    metafields.push({ ownerId: gid, namespace: "custom", key, type, value: cleanValue });
+  };
+
+  add("telna_iccid", iccid);
+  add("telna_package_id", packageId);
+  add("telna_package_template_id", packageTemplateId);
+  add("telna_activation_code", activationCode, "multi_line_text_field");
+  add("telna_euicc_state", euiccState);
+
+  const esimsJson = JSON.stringify([
+    {
+      iccid: String(iccid || "").trim() || null,
+      package_id: String(packageId || "").trim() || null,
+      package_template_id: String(packageTemplateId || "").trim() || null,
+      euicc_state: String(euiccState || "").trim() || null,
+    },
+  ]);
+  add("telna_esims_json", esimsJson, "multi_line_text_field");
+
+  if (!metafields.length) return true;
+
+  const mutation = `
+    mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
+      metafieldsSet(metafields: $metafields) {
+        userErrors { field message }
+      }
+    }
+  `;
+
+  const json = await shopifyGraphql(mutation, { metafields });
+  const userErrors = json?.data?.metafieldsSet?.userErrors || [];
+  if (userErrors.length) {
+    throw new Error(userErrors[0]?.message || "Failed to write Telna provisioning metafields");
+  }
+
+  return true;
 }
 
 // ---------- Customer Maya ID metafield ----------

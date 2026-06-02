@@ -3,13 +3,22 @@ import express from "express";
 import crypto from "crypto";
 import QRCode from "qrcode";
 import { Resend } from "resend";
-import "dotenv/config";
+import dotenv from "dotenv";
 import fs from "fs";
+
+dotenv.config();
+dotenv.config({ path: ".env.telna", override: false });
 
 // import { safeFetch } from "./utils/http.js"; // (unused right now) you can remove
 
 import {
   getVariantConfig,
+  getTelnaVariantConfig,
+  getTelnaIccidFromShopifyCustomer,
+  saveTelnaIccidToShopifyCustomer,
+  getTelnaOrderProcessedFlag,
+  markTelnaOrderProcessed,
+  saveTelnaProvisioningToOrder,
   getOrderProcessedFlag,
   markOrderProcessed,
   getMayaCustomerIdFromShopifyCustomer,
@@ -30,6 +39,12 @@ import {
   getMayaCustomerDetails,
   createMayaTopUp,
 } from "./services/maya.js";
+
+import {
+  createTelnaPackage,
+  findAvailableTelnaEsim,
+  retrieveTelnaEuiccProfile,
+} from "./services/telna.js";
 
 const app = express();
 console.log("BOOT MARKER: build-2026-02-15-01");
@@ -1459,6 +1474,219 @@ async function handleOrderPaidWebhook(order, reqForHeaders = null) {
   }
 }
 
+async function handleTelnaOrderPaidWebhook(order, reqForHeaders = null) {
+  const orderId = order?.id;
+  const { email, firstName } = pickBuyerFromOrder(order);
+
+  log.info("Telna order ID:", orderId);
+  log.info("Telna buyer:", { email, firstName });
+
+  if (!orderId) {
+    console.warn("No order id in payload, exiting.");
+    return { ok: true, skipped: true, reason: "missing_order_id" };
+  }
+
+  try {
+    const flag = await getTelnaOrderProcessedFlag(orderId);
+    if (flag?.processed) {
+      console.log("Order already processed by Telna flow, skipping:", {
+        orderId,
+        processedAt: flag.processedAt,
+      });
+      return { ok: true, skipped: true, reason: "already_processed" };
+    }
+  } catch (e) {
+    console.error("Could not read Telna processed flag:", e?.message || e);
+  }
+
+  let lockToken = null;
+  let lockAcquired = false;
+
+  try {
+    const lock = await tryAcquireOrderProcessingLock(orderId);
+    if (!lock?.acquired) {
+      console.log("Order is already being processed by another webhook. Skipping.", { orderId });
+      return { ok: true, skipped: true, reason: "locked" };
+    }
+
+    lockAcquired = true;
+    lockToken = lock.token;
+    console.log("Acquired processing lock:", { orderId, lockToken });
+  } catch (e) {
+    console.error("Failed to acquire processing lock:", e?.message || e);
+    return { ok: true, skipped: true, reason: "lock_error" };
+  }
+
+  let shouldMarkProcessed = true;
+
+  try {
+    const items = Array.isArray(order?.line_items) ? order.line_items : [];
+    const shopifyCustomerId = order?.customer?.id || order?.customer_id || null;
+    let customerTelnaIccid = null;
+
+    if (shopifyCustomerId) {
+      try {
+        customerTelnaIccid = await getTelnaIccidFromShopifyCustomer(shopifyCustomerId);
+      } catch (e) {
+        console.error("Could not read customer telna_iccid:", e?.message || e);
+      }
+    }
+
+    console.log("Telna line items:", items.length);
+
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      const variantId = String(item.variant_id || "").trim();
+      const qty = Number(item.quantity || 1);
+      const cfg = await getTelnaVariantConfig(variantId);
+      const packageTemplateId = cfg?.telnaPackageTemplateId;
+      const productType = cfg?.productType;
+
+      console.log(`Telna item #${i + 1}:`, {
+        title: item.title,
+        variant_title: item.variant_title,
+        variant_id: variantId,
+        quantity: qty,
+        telna_package_template_id: packageTemplateId,
+        product_type: productType,
+      });
+
+      if (!packageTemplateId) {
+        shouldMarkProcessed = false;
+        console.error("Missing custom.telna_package_template_id for variant:", variantId);
+        await sendAdminAlertEmail({
+          subject: `Telna provisioning config missing (Order #${orderId})`,
+          html: `
+            <p>A Shopify variant is missing <b>custom.telna_package_template_id</b>.</p>
+            <ul>
+              <li><b>Order ID</b>: ${esc(orderId)}</li>
+              <li><b>Variant ID</b>: ${esc(variantId)}</li>
+              <li><b>Product</b>: ${esc(item.title || "")}</li>
+            </ul>
+          `,
+        });
+        continue;
+      }
+
+      for (let q = 0; q < qty; q++) {
+        const isRecharge = productType === "recharge";
+        let selectedIccid = isRecharge ? customerTelnaIccid : null;
+        let isNewEsim = false;
+
+        if (!selectedIccid) {
+          if (isRecharge) {
+            shouldMarkProcessed = false;
+            await sendAdminAlertEmail({
+              subject: `Telna recharge needs existing ICCID (Order #${orderId})`,
+              html: `
+                <p>A recharge was ordered, but no <b>custom.telna_iccid</b> is saved on the Shopify customer.</p>
+                <ul>
+                  <li><b>Order ID</b>: ${esc(orderId)}</li>
+                  <li><b>Email</b>: ${esc(email || "")}</li>
+                  <li><b>Package Template ID</b>: ${esc(packageTemplateId)}</li>
+                </ul>
+              `,
+            });
+            continue;
+          }
+
+          const available = await findAvailableTelnaEsim();
+          selectedIccid = available.iccid;
+          isNewEsim = true;
+        }
+
+        try {
+          const telnaPackage = await createTelnaPackage({
+            iccid: selectedIccid,
+            packageTemplateId,
+          });
+
+          const euiccProfile = await retrieveTelnaEuiccProfile(selectedIccid);
+          const activationCode = euiccProfile?.activation_code || "";
+
+          if (!activationCode) {
+            throw new Error(`Telna eUICC profile missing activation_code for ${selectedIccid}`);
+          }
+
+          await saveTelnaProvisioningToOrder(orderId, {
+            iccid: selectedIccid,
+            packageId: telnaPackage?.id,
+            packageTemplateId,
+            activationCode,
+            euiccState: euiccProfile?.state,
+          });
+
+          if (isNewEsim && shopifyCustomerId && !customerTelnaIccid) {
+            await saveTelnaIccidToShopifyCustomer(shopifyCustomerId, selectedIccid);
+            customerTelnaIccid = selectedIccid;
+          }
+
+          if (isNewEsim) {
+            await sendEsimEmail({
+              to: email,
+              firstName,
+              orderId,
+              activationCode,
+              manualCode: activationCode,
+              smdpAddress: "",
+              apn: "globaldata",
+              planName: item.variant_title,
+              iccid: selectedIccid,
+              country: item.title,
+            });
+          } else {
+            await sendTopUpEmail({ to: email, firstName, orderId });
+          }
+
+          console.log("Telna provisioning completed:", {
+            orderId,
+            iccid: selectedIccid,
+            packageId: telnaPackage?.id,
+            packageTemplateId,
+            euiccState: euiccProfile?.state,
+            isNewEsim,
+          });
+        } catch (e) {
+          shouldMarkProcessed = false;
+          console.error("Telna provisioning failed:", e?.message || e);
+          await sendAdminAlertEmail({
+            subject: `Telna provisioning failed (Order #${orderId})`,
+            html: `
+              <p>Telna provisioning failed for a Shopify paid order.</p>
+              <ul>
+                <li><b>Order ID</b>: ${esc(orderId)}</li>
+                <li><b>Email</b>: ${esc(email || "")}</li>
+                <li><b>Variant ID</b>: ${esc(variantId)}</li>
+                <li><b>Package Template ID</b>: ${esc(packageTemplateId)}</li>
+                <li><b>ICCID</b>: ${esc(selectedIccid || "")}</li>
+              </ul>
+              <pre style="white-space:pre-wrap;">${esc(e?.message || String(e || ""))}</pre>
+            `,
+          });
+        }
+      }
+    }
+
+    if (shouldMarkProcessed) {
+      await markTelnaOrderProcessed(orderId);
+      console.log("Order marked as processed in Telna flow:", orderId);
+    } else {
+      console.warn("Not marking Telna order as processed because at least one step failed:", orderId);
+    }
+
+    return { ok: true, skipped: false, reason: "processed" };
+  } finally {
+    if (lockAcquired && lockToken) {
+      try {
+        const released = await releaseOrderProcessingLock(orderId, lockToken);
+        console.log("Released processing lock:", { orderId, released });
+      } catch (e) {
+        console.error("Failed to release processing lock:", e?.message || e);
+      }
+    }
+  }
+}
+
 // -----------------------------
 // Webhook: orders/paid - PROD
 // -----------------------------
@@ -1486,11 +1714,11 @@ app.post("/webhooks/order-paid", async (req, res) => {
     console.warn("⚠️ Could not write last-webhook.json:", e?.message || e);
   }
 
-  // ✅ Run the ONE canonical handler (includes lock + processed flag + saving maya_customer_id on ORDER)
+  // Run the Telna-first handler. The old Maya handler is kept above as reference/rollback only.
   try {
-    await handleOrderPaidWebhook(req.body || {}, req);
+    await handleTelnaOrderPaidWebhook(req.body || {}, req);
   } catch (e) {
-    console.error("❌ handleOrderPaidWebhook failed:", e?.message || e);
+    console.error("❌ handleTelnaOrderPaidWebhook failed:", e?.message || e);
     // still return 200 to avoid Shopify retry storms unless you explicitly want retries
   }
 
