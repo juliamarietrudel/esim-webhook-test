@@ -296,6 +296,96 @@ export async function saveTelnaProvisioningToOrder(orderId, {
   return true;
 }
 
+export async function fulfillShopifyOrder(orderId, { notifyCustomer = false } = {}) {
+  if (!orderId) throw new Error("fulfillShopifyOrder: missing orderId");
+
+  const gid = `gid://shopify/Order/${orderId}`;
+  const query = `
+    query ($id: ID!) {
+      order(id: $id) {
+        fulfillmentOrders(first: 50) {
+          nodes {
+            id
+            status
+            requestStatus
+            supportedActions {
+              action
+            }
+            lineItems(first: 100) {
+              nodes {
+                id
+                remainingQuantity
+              }
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  const json = await shopifyGraphql(query, { id: gid });
+  const fulfillmentOrders = json?.data?.order?.fulfillmentOrders?.nodes || [];
+  const fulfillable = fulfillmentOrders
+    .filter((fo) => {
+      const actions = Array.isArray(fo?.supportedActions) ? fo.supportedActions : [];
+      return actions.some((a) => String(a?.action || "").toUpperCase() === "CREATE_FULFILLMENT");
+    })
+    .map((fo) => {
+      const lineItems = (fo?.lineItems?.nodes || [])
+        .filter((lineItem) => Number(lineItem?.remainingQuantity || 0) > 0)
+        .map((lineItem) => ({
+          id: lineItem.id,
+          quantity: Number(lineItem.remainingQuantity),
+        }));
+
+      return lineItems.length
+        ? {
+            fulfillmentOrderId: fo.id,
+            fulfillmentOrderLineItems: lineItems,
+          }
+        : null;
+    })
+    .filter(Boolean);
+
+  if (!fulfillable.length) {
+    return { fulfilled: false, reason: "no_fulfillable_orders" };
+  }
+
+  const mutation = `
+    mutation fulfillmentCreate($fulfillment: FulfillmentInput!, $message: String) {
+      fulfillmentCreate(fulfillment: $fulfillment, message: $message) {
+        fulfillment {
+          id
+          status
+        }
+        userErrors {
+          field
+          message
+        }
+      }
+    }
+  `;
+
+  const result = await shopifyGraphql(mutation, {
+    fulfillment: {
+      notifyCustomer,
+      lineItemsByFulfillmentOrder: fulfillable,
+    },
+    message: "eSIM provisioned and QR code sent.",
+  });
+
+  const userErrors = result?.data?.fulfillmentCreate?.userErrors || [];
+  if (userErrors.length) {
+    throw new Error(userErrors[0]?.message || "Failed to fulfill Shopify order");
+  }
+
+  return {
+    fulfilled: true,
+    fulfillmentId: result?.data?.fulfillmentCreate?.fulfillment?.id || null,
+    status: result?.data?.fulfillmentCreate?.fulfillment?.status || null,
+  };
+}
+
 // ---------- Customer Maya ID metafield ----------
 export async function getMayaCustomerIdFromShopifyCustomer(shopifyCustomerId) {
   const url = shopifyGraphqlUrl();

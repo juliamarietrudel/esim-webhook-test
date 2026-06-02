@@ -19,6 +19,7 @@ import {
   getTelnaOrderProcessedFlag,
   markTelnaOrderProcessed,
   saveTelnaProvisioningToOrder,
+  fulfillShopifyOrder,
   getOrderProcessedFlag,
   markOrderProcessed,
   getMayaCustomerIdFromShopifyCustomer,
@@ -1636,6 +1637,25 @@ async function handleTelnaOrderPaidWebhook(order, reqForHeaders = null) {
             });
           } else {
             await sendTopUpEmail({ to: email, firstName, orderId });
+          }
+
+          try {
+            const fulfillment = await fulfillShopifyOrder(orderId, { notifyCustomer: false });
+            console.log("Shopify fulfillment result:", { orderId, fulfillment });
+          } catch (fulfillmentErr) {
+            console.error("Failed to auto-fulfill Shopify order:", fulfillmentErr?.message || fulfillmentErr);
+            await sendAdminAlertEmail({
+              subject: `Shopify fulfillment failed after Telna provisioning (Order #${orderId})`,
+              html: `
+                <p>Telna provisioning and customer email succeeded, but Shopify fulfillment failed.</p>
+                <ul>
+                  <li><b>Order ID</b>: ${esc(orderId)}</li>
+                  <li><b>ICCID</b>: ${esc(selectedIccid || "")}</li>
+                  <li><b>Package ID</b>: ${esc(telnaPackage?.id || "")}</li>
+                </ul>
+                <pre style="white-space:pre-wrap;">${esc(fulfillmentErr?.message || String(fulfillmentErr || ""))}</pre>
+              `,
+            });
           }
 
           console.log("Telna provisioning completed:", {
