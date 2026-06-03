@@ -1038,3 +1038,70 @@ export async function getOrdersWithEsims({ daysBack = 120 } = {}) {
     })
     .filter(Boolean);
 }
+
+export async function getOrdersWithTelnaPackages({ daysBack = 365 } = {}) {
+  const sinceDate = new Date(Date.now() - daysBack * 24 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 10);
+
+  const searchQuery =
+    `created_at:>='${sinceDate}' ` +
+    `AND metafield:custom.telna_processed:true`;
+
+  const query = `
+    query OrdersWithTelnaPackages($first: Int!, $query: String!) {
+      orders(first: $first, query: $query, sortKey: CREATED_AT, reverse: true) {
+        edges {
+          node {
+            id
+            name
+            email
+            customer {
+              firstName
+              email
+            }
+            telnaIccid: metafield(namespace: "custom", key: "telna_iccid") { value }
+            telnaPackageId: metafield(namespace: "custom", key: "telna_package_id") { value }
+            telnaPackageTemplateId: metafield(namespace: "custom", key: "telna_package_template_id") { value }
+            telnaEsimsJson: metafield(namespace: "custom", key: "telna_esims_json") { value }
+          }
+        }
+      }
+    }
+  `;
+
+  const json = await shopifyGraphql(query, { first: 100, query: searchQuery });
+  const edges = json?.data?.orders?.edges || [];
+
+  return edges
+    .map(({ node }) => {
+      const orderGid = node?.id || "";
+      const orderId = orderGid.split("/").pop();
+      const orderName = String(node?.name || "").trim();
+      const email = String(node?.email || node?.customer?.email || "").trim();
+      const firstName = String(node?.customer?.firstName || "").trim();
+
+      const singleIccid = String(node?.telnaIccid?.value || "").trim();
+      const singlePackageId = String(node?.telnaPackageId?.value || "").trim();
+      const singlePackageTemplateId = String(node?.telnaPackageTemplateId?.value || "").trim();
+
+      const packagesFromJson = parseEsimsJson(node?.telnaEsimsJson?.value)
+        .map((e) => ({
+          iccid: String(e?.iccid || "").trim(),
+          packageId: String(e?.package_id || e?.packageId || "").trim(),
+          packageTemplateId: String(e?.package_template_id || e?.packageTemplateId || "").trim(),
+        }))
+        .filter((e) => e.iccid && e.packageId);
+
+      const telnaPackages = packagesFromJson.length
+        ? packagesFromJson
+        : (singleIccid && singlePackageId
+          ? [{ iccid: singleIccid, packageId: singlePackageId, packageTemplateId: singlePackageTemplateId }]
+          : []);
+
+      if (!orderId || !telnaPackages.length) return null;
+
+      return { orderId, orderName, email, firstName, telnaPackages };
+    })
+    .filter(Boolean);
+}

@@ -81,6 +81,13 @@ export async function createTelnaPackage({ iccid, packageTemplateId, timeAllowan
   });
 }
 
+export async function retrieveTelnaPackage(packageId) {
+  const cleanPackageId = String(packageId || "").trim();
+  if (!cleanPackageId) throw new Error("retrieveTelnaPackage: missing packageId");
+
+  return await telnaFetch(`/pcr/packages/${encodeURIComponent(cleanPackageId)}`);
+}
+
 export async function retrieveTelnaEuiccProfile(iccid) {
   const cleanIccid = String(iccid || "").trim();
   if (!cleanIccid) throw new Error("retrieveTelnaEuiccProfile: missing iccid");

@@ -15,6 +15,34 @@ Current safe production assumption while waiting for Telna confirmation:
 - Classic/Global eSIM purchase: assign one unused eSIM ICCID per purchase.
 - Same-ICCID top-up/reuse: technically possible through `POST /pcr/packages`, but should not become the default production behavior until Telna confirms it is recommended for Global/Classic eSIMs.
 
+### Telna usage alert cron
+
+The usage alert endpoint is:
+
+```text
+GET /cron/check-usage?token=<CRON_SECRET>
+```
+
+It checks recent Shopify orders marked with `custom.telna_processed=true`, reads the saved Telna `package_id`, retrieves the package from Telna, and calculates:
+
+```text
+percent used = 1 - data_usage_remaining / package_template.data_usage_allowance
+```
+
+When usage reaches `USAGE_ALERT_THRESHOLD_PERCENT` (default `75`), it sends the customer an email and stores the alert key in the Shopify order metafield `custom.usage_alerts_sent` so the same package does not trigger duplicate emails.
+
+Recommended Render cron URL:
+
+```text
+https://<render-service-url>/cron/check-usage?token=<CRON_SECRET>
+```
+
+Recommended schedule:
+
+```text
+Every 30 minutes
+```
+
 <!-- CREATE BASE N64 -->
 echo -n 'API_KEY:API_SECRET' | base64
 

@@ -19,6 +19,7 @@ import {
   getTelnaOrderProcessedFlag,
   markTelnaOrderProcessed,
   saveTelnaProvisioningToOrder,
+  getOrdersWithTelnaPackages,
   fulfillShopifyOrder,
   getOrderProcessedFlag,
   markOrderProcessed,
@@ -26,7 +27,6 @@ import {
   saveMayaCustomerIdToShopifyCustomer,
   saveMayaCustomerIdToOrder,
   saveEsimToOrder,
-  getOrdersWithEsims,
   usageAlertKey,
   getUsageAlertFlag,
   markUsageAlertSent,
@@ -44,6 +44,7 @@ import {
 import {
   createTelnaPackage,
   findAvailableTelnaEsim,
+  retrieveTelnaPackage,
   retrieveTelnaEuiccProfile,
 } from "./services/telna.js";
 
@@ -848,100 +849,72 @@ app.get("/cron/check-usage", async (req, res) => {
   log.info("🕒 CRON check-usage triggered:", new Date().toISOString());
 
   try {
-    const orders = await getOrdersWithEsims({ daysBack: 365 });
-    log.info("✅ Orders with eSIMs found:", orders.length);
+    const orders = await getOrdersWithTelnaPackages({ daysBack: 365 });
+    log.info("✅ Orders with Telna packages found:", orders.length);
 
     for (const o of orders) {
-      const { orderId, orderName, esims, mayaCustomerId } = o;
+      const { orderId, orderName, email, firstName, telnaPackages } = o;
 
-    // Fetch email + name from Maya (not Shopify) AND build an eSIM index from the same payload
-    let email = "";
-    let firstName = "";
-    let mayaDetails = null;
-    let mayaEsimIndex = null;
+      log.info(`\n🧾 Order ${orderName || orderId} — Telna packages found: ${telnaPackages.length}`);
 
-    if (mayaCustomerId) {
-      try {
-        mayaDetails = await getMayaCustomerDetails(mayaCustomerId);
-        email = String(mayaDetails?.customer?.email || "").trim();
-        firstName = String(mayaDetails?.customer?.first_name || "").trim();
-        mayaEsimIndex = buildMayaEsimIndex(mayaDetails);
-      } catch (err) {
-        log.warn("⚠️ Failed to fetch Maya customer details for usage email:", {
-          orderId,
-          mayaCustomerId,
-          err: err?.message || err,
-        });
-      }
-    } else {
-      log.warn("⚠️ Order missing mayaCustomerId; cannot send usage alert email.", { orderId, orderName });
-    }
-
-      log.info(`\n🧾 Order ${orderId} — eSIMs found: ${esims.length}`);
-
-      if (!mayaEsimIndex) {
-        log.warn("⚠️ Skipping order (no Maya payload/index available).", { orderId, mayaCustomerId });
-        continue;
-      }
-
-      for (const e of esims) {
+      for (const e of telnaPackages) {
         const iccid = normalizeIccid(e?.iccid);
-        if (!iccid) continue;
+        const packageId = String(e?.packageId || "").trim();
+        if (!iccid || !packageId) continue;
 
-        log.info(`🔎 Usage check — order ${orderId} — ICCID: ${iccid}`);
+        log.info(`🔎 Telna usage check — order ${orderId} — ICCID: ${iccid} — package: ${packageId}`);
 
-        const mayaEsim = mayaEsimIndex.get(iccid);
-        if (!mayaEsim) {
-          log.warn("⚠️ ICCID not found in Maya customer payload (skipping)", { orderId, iccid, mayaCustomerId });
-          continue;
-        }
-
-        const plans = Array.isArray(mayaEsim?.plans) ? mayaEsim.plans : [];
-        log.debug("📦 Plans found (from customer payload):", plans.length);
-
-        const activePlan = pickCurrentPlan(plans);
-        if (!activePlan) {
-          log.warn("⚠️ No usable plan found for ICCID (skipping)", { orderId, iccid });
-          continue;
-        }
-
-        // ✅ Only alert if the plan is activated AND network is ACTIVE/ENABLED
-        const activatedRaw = String(activePlan?.date_activated || "");
-        const isActivated = activatedRaw && activatedRaw !== "0000-00-00 00:00:00";
-
-        const netRaw = String(activePlan?.network_status || "").toUpperCase();
-        const isNetActive = netRaw === "ACTIVE" || netRaw === "ENABLED";
-
-        if (!isActivated || !isNetActive) {
-          log.debug("ℹ️ Skipping usage alert (plan not active)", {
+        let telnaPackage = null;
+        try {
+          telnaPackage = await retrieveTelnaPackage(packageId);
+        } catch (err) {
+          log.warn("⚠️ Failed to retrieve Telna package usage:", {
+            orderId,
             iccid,
-            planId: activePlan?.id,
-            date_activated: activatedRaw,
-            network_status: netRaw,
+            packageId,
+            err: err?.message || err,
           });
           continue;
         }
 
-        const totalBytes = Number(activePlan?.data_quota_bytes || 0);
-        const remainingBytes = Number(activePlan?.data_bytes_remaining || 0);
-
-        if (!Number.isFinite(totalBytes) || totalBytes <= 0) {
-          log.warn("⚠️ Invalid data quota for ICCID", { orderId, iccid, totalBytes });
+        const packageStatus = String(telnaPackage?.status || "").toUpperCase();
+        if (packageStatus === "NOT_ACTIVE") {
+          log.debug("ℹ️ Skipping Telna usage alert (package not active yet)", {
+            iccid,
+            packageId,
+            packageStatus,
+          });
           continue;
         }
 
-        const usedBytes = totalBytes - remainingBytes;
-        const percentUsed = Math.round((usedBytes / totalBytes) * 100);
+        const totalBytes = Number(telnaPackage?.package_template?.data_usage_allowance || 0);
+        const remainingBytes = Number(telnaPackage?.data_usage_remaining ?? totalBytes);
+
+        if (!Number.isFinite(totalBytes) || totalBytes <= 0) {
+          log.warn("⚠️ Invalid Telna data allowance", { orderId, iccid, packageId, totalBytes });
+          continue;
+        }
+
+        const usedBytes = Math.max(0, totalBytes - Math.max(0, remainingBytes));
+        const percentUsed = Math.min(100, Math.round((usedBytes / totalBytes) * 100));
 
         // Important summary log only
-        log.info("📊 Usage", { orderId, iccid, planId: activePlan?.id, percentUsed });
+        log.info("📊 Telna usage", {
+          orderId,
+          iccid,
+          packageId,
+          packageStatus,
+          percentUsed,
+          remainingBytes,
+          totalBytes,
+        });
 
         const threshold = Number.isFinite(USAGE_ALERT_THRESHOLD_PERCENT)
           ? USAGE_ALERT_THRESHOLD_PERCENT
-          : 20;
+          : 75;
 
         if (Number.isFinite(percentUsed) && percentUsed >= threshold) {
-          const key = usageAlertKey(threshold, iccid);
+          const key = usageAlertKey(threshold, `${iccid}_${packageId}`);
 
           let flag = { sent: false };
           try {
@@ -955,7 +928,7 @@ app.get("/cron/check-usage", async (req, res) => {
           } else {
             if (!email) {
               log.warn(
-                `⚠️ Usage alert triggered (${percentUsed}%) but no customer email could be resolved (mayaCustomerId=${mayaCustomerId || "none"}). Order ${orderId}`
+                `⚠️ Telna usage alert triggered (${percentUsed}%) but no customer email could be resolved. Order ${orderId}`
               );
             } else {
               try {
@@ -966,7 +939,7 @@ app.get("/cron/check-usage", async (req, res) => {
                   percentUsed,
                   thresholdPercent: threshold,
                   iccid,
-                  planId: activePlan?.id,
+                  planId: packageId,
                 });
 
                 await markUsageAlertSent(orderId, key);
