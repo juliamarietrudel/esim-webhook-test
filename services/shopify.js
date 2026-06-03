@@ -425,6 +425,7 @@ export async function getOrdersWithTelnaPackages({ daysBack = 365 } = {}) {
             name
             email
             customer { firstName email }
+            telnaProcessed: metafield(namespace: "custom", key: "telna_processed") { value }
             telnaIccid: metafield(namespace: "custom", key: "telna_iccid") { value }
             telnaPackageId: metafield(namespace: "custom", key: "telna_package_id") { value }
             telnaPackageTemplateId: metafield(namespace: "custom", key: "telna_package_template_id") { value }
@@ -435,7 +436,9 @@ export async function getOrdersWithTelnaPackages({ daysBack = 365 } = {}) {
     }
   `;
 
-  const searchQuery = `created_at:>='${sinceDate}' AND metafield:custom.telna_processed:true`;
+  // Shopify order search does not reliably index metafields, so fetch recent
+  // orders and inspect Telna metafields directly in code.
+  const searchQuery = `created_at:>='${sinceDate}'`;
   const json = await shopifyGraphql(query, { first: 100, query: searchQuery });
   const edges = json?.data?.orders?.edges || [];
 
@@ -445,6 +448,9 @@ export async function getOrdersWithTelnaPackages({ daysBack = 365 } = {}) {
       const orderName = String(node?.name || "").trim();
       const email = String(node?.email || node?.customer?.email || "").trim();
       const firstName = String(node?.customer?.firstName || "").trim();
+
+      const telnaProcessed = String(node?.telnaProcessed?.value || "").trim().toLowerCase() === "true";
+      if (!telnaProcessed) return null;
 
       const singleIccid = String(node?.telnaIccid?.value || "").trim();
       const singlePackageId = String(node?.telnaPackageId?.value || "").trim();
