@@ -836,6 +836,7 @@ app.get("/test-email", async (_req, res) => {
 app.get("/cron/check-usage", async (req, res) => {
   const secret = (process.env.CRON_SECRET || "").trim();
   const token = String(req.query.token || "").trim();
+  const dryRun = String(req.query.dry_run || "").trim() === "1";
 
   if (!secret) {
     console.error("❌ Missing CRON_SECRET env var");
@@ -846,11 +847,22 @@ app.get("/cron/check-usage", async (req, res) => {
     return res.status(401).send("Unauthorized");
   }
 
-  log.info("🕒 CRON check-usage triggered:", new Date().toISOString());
+  log.info("🕒 CRON check-usage triggered:", { at: new Date().toISOString(), dryRun });
 
   try {
     const orders = await getOrdersWithTelnaPackages({ daysBack: 365 });
     log.info("✅ Orders with Telna packages found:", orders.length);
+    const summary = {
+      ok: true,
+      dryRun,
+      thresholdPercent: Number.isFinite(USAGE_ALERT_THRESHOLD_PERCENT) ? USAGE_ALERT_THRESHOLD_PERCENT : 75,
+      ordersChecked: orders.length,
+      packagesChecked: 0,
+      alertsSent: 0,
+      alreadySent: 0,
+      skipped: [],
+      packages: [],
+    };
 
     for (const o of orders) {
       const { orderId, orderName, email, firstName, telnaPackages } = o;
@@ -861,6 +873,7 @@ app.get("/cron/check-usage", async (req, res) => {
         const iccid = normalizeIccid(e?.iccid);
         const packageId = String(e?.packageId || "").trim();
         if (!iccid || !packageId) continue;
+        summary.packagesChecked += 1;
 
         log.info(`🔎 Telna usage check — order ${orderId} — ICCID: ${iccid} — package: ${packageId}`);
 
@@ -874,29 +887,47 @@ app.get("/cron/check-usage", async (req, res) => {
             packageId,
             err: err?.message || err,
           });
-          continue;
-        }
-
-        const packageStatus = String(telnaPackage?.status || "").toUpperCase();
-        if (packageStatus === "NOT_ACTIVE") {
-          log.debug("ℹ️ Skipping Telna usage alert (package not active yet)", {
+          summary.skipped.push({
+            orderId,
             iccid,
             packageId,
-            packageStatus,
+            reason: "telna_package_retrieve_failed",
+            error: err?.message || String(err || ""),
           });
           continue;
         }
 
+        const packageStatus = String(telnaPackage?.status || "").toUpperCase();
         const totalBytes = Number(telnaPackage?.package_template?.data_usage_allowance || 0);
         const remainingBytes = Number(telnaPackage?.data_usage_remaining ?? totalBytes);
 
         if (!Number.isFinite(totalBytes) || totalBytes <= 0) {
           log.warn("⚠️ Invalid Telna data allowance", { orderId, iccid, packageId, totalBytes });
+          summary.skipped.push({
+            orderId,
+            iccid,
+            packageId,
+            packageStatus,
+            reason: "invalid_data_allowance",
+          });
           continue;
         }
 
         const usedBytes = Math.max(0, totalBytes - Math.max(0, remainingBytes));
         const percentUsed = Math.min(100, Math.round((usedBytes / totalBytes) * 100));
+        const packageSummary = {
+          orderId,
+          orderName,
+          iccid,
+          packageId,
+          packageStatus,
+          percentUsed,
+          remainingBytes,
+          totalBytes,
+          wouldAlert: false,
+          alertSent: false,
+        };
+        summary.packages.push(packageSummary);
 
         // Important summary log only
         log.info("📊 Telna usage", {
@@ -913,7 +944,24 @@ app.get("/cron/check-usage", async (req, res) => {
           ? USAGE_ALERT_THRESHOLD_PERCENT
           : 75;
 
+        if (packageStatus === "NOT_ACTIVE") {
+          log.debug("ℹ️ Skipping Telna usage alert (package not active yet)", {
+            iccid,
+            packageId,
+            packageStatus,
+          });
+          summary.skipped.push({
+            orderId,
+            iccid,
+            packageId,
+            packageStatus,
+            reason: "package_not_active",
+          });
+          continue;
+        }
+
         if (Number.isFinite(percentUsed) && percentUsed >= threshold) {
+          packageSummary.wouldAlert = true;
           const key = usageAlertKey(threshold, `${iccid}_${packageId}`);
 
           let flag = { sent: false };
@@ -924,7 +972,10 @@ app.get("/cron/check-usage", async (req, res) => {
           }
 
           if (flag.sent) {
+            summary.alreadySent += 1;
             log.info(`ℹ️ Usage alert already sent for ${orderId}:${key}, skipping.`);
+          } else if (dryRun) {
+            log.info(`🧪 Dry run: would send usage alert for ${orderId}:${key}`);
           } else {
             if (!email) {
               log.warn(
@@ -943,6 +994,8 @@ app.get("/cron/check-usage", async (req, res) => {
                 });
 
                 await markUsageAlertSent(orderId, key);
+                summary.alertsSent += 1;
+                packageSummary.alertSent = true;
                 log.info(`✅ Marked usage alert as sent on Shopify for ${orderId}:${key}`);
               } catch (err) {
                 log.error("❌ Failed to send/mark usage alert email:", err?.message || err);
@@ -953,7 +1006,7 @@ app.get("/cron/check-usage", async (req, res) => {
       }
     }
 
-    return res.status(200).json({ ok: true, count: orders.length });
+    return res.status(200).json(summary);
   } catch (e) {
     console.error("❌ Cron check-usage failed:", e?.message || e);
     return res.status(500).json({ ok: false, error: e?.message || String(e) });
