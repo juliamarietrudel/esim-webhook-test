@@ -1,3 +1,20 @@
+## Telna sandbox configuration
+
+For the Telna migration, the webhook provisions paid Shopify orders by selecting an unused Telna eSIM ICCID, adding the purchased package template to that ICCID, and emailing the activation QR code to the customer.
+
+Recommended Telna environment variables:
+
+- `TELNA_API_TOKEN`: Telna Connect API key.
+- `TELNA_BASE_URL`: Telna API base URL, for example `https://developer-api.telna.com/v2.1`.
+- `TELNA_INVENTORY_ID`: Optional but recommended. Pins eSIM selection to one Telna inventory. Current sandbox inventory: `52399`.
+- `TELNA_GROUP_ID`: Optional. Pins eSIM selection to one Telna billing/group if needed.
+- `TELNA_DEFAULT_PACKAGE_TEMPLATE_ID`: Temporary sandbox fallback only. For production, prefer setting `custom.telna_package_template_id` on each Shopify variant and removing this default.
+
+Current safe production assumption while waiting for Telna confirmation:
+
+- Classic/Global eSIM purchase: assign one unused eSIM ICCID per purchase.
+- Same-ICCID top-up/reuse: technically possible through `POST /pcr/packages`, but should not become the default production behavior until Telna confirms it is recommended for Global/Classic eSIMs.
+
 <!-- CREATE BASE N64 -->
 echo -n 'API_KEY:API_SECRET' | base64
 
@@ -190,4 +207,3 @@ SUMMARY
 	4.	Parse the order into “actions” based on the products bought
 	5.	Execute actions (create eSIM / top up / change / delete)
 	6.	Email results (QR codes, confirmations)
-

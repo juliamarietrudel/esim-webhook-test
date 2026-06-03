@@ -69,6 +69,24 @@ const USAGE_ALERT_THRESHOLD_PERCENT = Number(process.env.USAGE_ALERT_THRESHOLD_P
 // NOTE: if the server restarts, this resets. For true "send once" you should persist a flag in Shopify metafields.
 
 // -----------------------------
+// Telna settings
+// -----------------------------
+function optionalEnvNumber(name) {
+  const raw = String(process.env[name] || "").trim();
+  if (!raw) return undefined;
+
+  const value = Number(raw);
+  if (!Number.isFinite(value)) {
+    throw new Error(`${name} must be a number when provided`);
+  }
+
+  return value;
+}
+
+const TELNA_INVENTORY_ID = optionalEnvNumber("TELNA_INVENTORY_ID");
+const TELNA_GROUP_ID = optionalEnvNumber("TELNA_GROUP_ID");
+
+// -----------------------------
 // Email (Resend)
 // -----------------------------
 const resendApiKey = (process.env.RESEND_API_KEY || "").trim();
@@ -1591,7 +1609,10 @@ async function handleTelnaOrderPaidWebhook(order, reqForHeaders = null) {
             continue;
           }
 
-          const available = await findAvailableTelnaEsim();
+          const available = await findAvailableTelnaEsim({
+            inventory: TELNA_INVENTORY_ID,
+            group: TELNA_GROUP_ID,
+          });
           selectedIccid = available.iccid;
           isNewEsim = true;
         }
