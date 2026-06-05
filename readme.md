@@ -90,6 +90,53 @@ value: recharge
 
 Recharge behavior currently expects the Shopify customer to already have `custom.telna_iccid` saved.
 
+## Importing Maya Plans As Telna Package Templates
+
+The Maya CSV files can be converted into Telna package-template payloads with:
+
+```bash
+npm run telna:templates:preview
+```
+
+This reads `/Users/juliatrudel/Desktop/countries.csv` by default and writes review files to:
+
+```text
+outputs/telna-package-templates/countries-preview.csv
+outputs/telna-package-templates/countries-payloads.json
+```
+
+The preview does not call Telna. It maps country names to ISO-3 country codes, converts `Data (GB)` to bytes, converts `Validity (Days)` to seconds, and marks rows that need a decision before import.
+
+To create templates in Telna after reviewing the preview:
+
+```bash
+npm run telna:templates:create
+```
+
+Required environment variables for creation:
+
+```bash
+TELNA_API_TOKEN=...
+TELNA_BASE_URL=https://developer-api.telna.com/v2.1
+TELNA_INVENTORY_ID=...
+TELNA_TRAFFIC_POLICY_ID=...
+```
+
+Optional creation settings:
+
+```bash
+TELNA_ACTIVATION_TYPE=AUTO
+TELNA_ACTIVATION_TIME_ALLOWANCE_DAYS=365
+TELNA_AVAILABLE_DAYS=365
+```
+
+Notes:
+
+- Telna package templates do not contain Shopify pricing. Maya `WSP info` and `RRP info` are preserved in the preview/mapping files for Shopify product setup, but Telna only receives the package configuration.
+- Fixed-data country plans can be imported directly.
+- Maya `Unlimited` plans need a separate Telna traffic-policy decision before they can be imported safely.
+- Region plans need a confirmed list of ISO-3 countries per region before they can become Telna package templates.
+
 ## Shopify Order Metafields Written By The Service
 
 The service writes these order metafields after provisioning:

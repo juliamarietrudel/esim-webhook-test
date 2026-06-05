@@ -4,7 +4,9 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "telna:templates:preview": "node scripts/telna-package-templates.js",
+    "telna:templates:create": "node scripts/telna-package-templates.js --create"
   },
   "dependencies": {
     "dotenv": "^17.2.4",

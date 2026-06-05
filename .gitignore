@@ -6,3 +6,4 @@ node_modules
 # local debug artifacts
 last-webhook.json
 replay-webhook.js
+outputs/
