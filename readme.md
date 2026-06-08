@@ -79,16 +79,21 @@ Variant: 200MB / 1 Day
 custom.telna_package_template_id = 21425998
 ```
 
-For recharge/top-up products, set this variant metafield too:
+Top-up behavior is automatic:
+
+- If the Shopify customer does not have `custom.telna_iccid`, the service assigns a new Telna eSIM and sends the QR-code installation email.
+- If the Shopify customer already has `custom.telna_iccid`, the service reuses that ICCID, adds the purchased package, and sends a different confirmation email without a QR code.
+
+Optional override:
 
 ```text
 namespace: custom
 key: type_de_produit
 type: single line text
-value: recharge
+value: new_esim
 ```
 
-Recharge behavior currently expects the Shopify customer to already have `custom.telna_iccid` saved.
+Use `new_esim` only if a variant should force a brand-new eSIM even for a returning customer.
 
 ## Importing Maya Plans As Telna Package Templates
 

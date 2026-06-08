@@ -381,13 +381,26 @@ async function sendEsimEmail({
   return true;
 }
 
-function formatTopUpEmailHtml({ firstName }) {
+function formatTopUpEmailHtml({
+  firstName,
+  planName,
+  country,
+  validityDays,
+  dataQuotaMb,
+  iccid,
+}) {
   const safeName = (firstName || "").trim() || "client(e)";
 
   const bullet = (text) =>
     `<li style="margin:10px 0; line-height:1.45; color:#334155; font-size:14px;">${text}</li>`;
 
+  const row = (label, value) =>
+    value
+      ? `<tr><td style="padding:10px 0; font-size:14px; color:#334155;"><b>${label} :</b> ${esc(value)}</td></tr>`
+      : "";
+
   const links = {
+    conso: "https://quebecesim.ca/pages/comment-suivre-ma-consommation",
     contact: "https://quebecesim.ca/pages/contactez-nous",
   };
 
@@ -431,7 +444,7 @@ function formatTopUpEmailHtml({ firstName }) {
             <td style="padding: 28px 24px;">
 
               <h1 style="margin: 0 0 16px; font-size: 22px; color:#0F172A;">
-                Recharge appliquée ✅
+                Votre nouveau forfait a été ajouté
               </h1>
 
               <p style="font-size: 15px; color:#334155; margin: 0 0 14px;">
@@ -439,16 +452,17 @@ function formatTopUpEmailHtml({ firstName }) {
               </p>
 
               <p style="font-size: 15px; color:#334155; margin: 0 0 18px;">
-                Nous vous confirmons que votre <b>recharge eSIM</b> a bien été appliquée à votre forfait actuel.
+                Nous vous confirmons que votre nouveau forfait a bien été ajouté à votre eSIM déjà installée.
               </p>
 
               <table width="100%" cellpadding="0" cellspacing="0" border="0"
                 style="background:#FFFFFF; border: 1px solid #E5E7EB; border-radius: 14px; padding: 18px; margin-bottom: 18px;">
-                <tr>
-                  <td style="padding:10px 0; font-size:14px; color:#334155;">
-                    <b>Activation :</b> la recharge s’activera automatiquement à l’expiration de votre forfait en cours.
-                  </td>
-                </tr>
+                ${row("Forfait", planName)}
+                ${row("Destination", country)}
+                ${row("Validité", validityDays ? `${validityDays} jours` : "")}
+                ${row("Données", dataQuotaMb ? `${dataQuotaMb} Mo` : "")}
+                ${row("ICCID", iccid)}
+                <tr><td style="padding:10px 0; font-size:14px; color:#334155;"><b>Activation :</b> le forfait s’activera automatiquement selon les règles de votre forfait Telna.</td></tr>
               </table>
 
               <table width="100%" cellpadding="0" cellspacing="0" border="0"
@@ -462,8 +476,10 @@ function formatTopUpEmailHtml({ firstName }) {
 
               <h2 style="font-size: 16px; color:#0F172A; margin: 0 0 10px;">Rappel rapide</h2>
               <ul style="margin:0 0 18px 18px; padding:0;">
+                ${bullet("Vous n’avez pas besoin de scanner un nouveau code QR si votre eSIM Québec eSIM est déjà installée.")}
                 ${bullet("Assurez-vous que l’itinérance des données est <b>ACTIVÉE</b> pour votre eSIM.")}
                 ${bullet("Vérifiez que votre mode avion est <b>DÉSACTIVÉ</b>.")}
+                ${bullet(`Vous pouvez suivre votre consommation ici : <a href="${links.conso}" style="color:#0CA3EC; text-decoration:none;">Comment suivre ma consommation ?</a>`)}
               </ul>
 
               <p style="font-size: 14px; color:#334155; margin: 18px 0 0;">
@@ -500,7 +516,16 @@ function formatTopUpEmailHtml({ firstName }) {
 </html>`;
 }
 
-async function sendTopUpEmail({ to, firstName, orderId }) {
+async function sendTopUpEmail({
+  to,
+  firstName,
+  orderId,
+  planName,
+  country,
+  validityDays,
+  dataQuotaMb,
+  iccid,
+}) {
   if (!emailEnabled) {
     console.log("ℹ️ Skipping top-up email (email not configured).");
     return false;
@@ -511,10 +536,17 @@ async function sendTopUpEmail({ to, firstName, orderId }) {
   }
 
   const subject = orderId
-    ? `Recharge eSIM appliquée (Commande #${orderId})`
-    : "Recharge eSIM appliquée";
+    ? `Forfait ajouté à votre eSIM (Commande #${orderId})`
+    : "Forfait ajouté à votre eSIM";
 
-  const html = formatTopUpEmailHtml({ firstName });
+  const html = formatTopUpEmailHtml({
+    firstName,
+    planName,
+    country,
+    validityDays,
+    dataQuotaMb,
+    iccid,
+  });
 
   const result = await resend.emails.send({
     from: emailFrom,
@@ -1102,27 +1134,11 @@ async function handleTelnaOrderPaidWebhook(order, reqForHeaders = null) {
       }
 
       for (let q = 0; q < qty; q++) {
-        const isRecharge = productType === "recharge";
-        let selectedIccid = isRecharge ? customerTelnaIccid : null;
+        const forceNewEsim = ["new_esim", "nouvelle_esim"].includes(productType);
+        let selectedIccid = forceNewEsim ? null : customerTelnaIccid;
         let isNewEsim = false;
 
         if (!selectedIccid) {
-          if (isRecharge) {
-            shouldMarkProcessed = false;
-            await sendAdminAlertEmail({
-              subject: `Telna recharge needs existing ICCID (Order #${orderId})`,
-              html: `
-                <p>A recharge was ordered, but no <b>custom.telna_iccid</b> is saved on the Shopify customer.</p>
-                <ul>
-                  <li><b>Order ID</b>: ${esc(orderId)}</li>
-                  <li><b>Email</b>: ${esc(email || "")}</li>
-                  <li><b>Package Template ID</b>: ${esc(packageTemplateId)}</li>
-                </ul>
-              `,
-            });
-            continue;
-          }
-
           const available = await findAvailableTelnaEsim({
             inventory: TELNA_INVENTORY_ID,
             group: TELNA_GROUP_ID,
@@ -1140,7 +1156,7 @@ async function handleTelnaOrderPaidWebhook(order, reqForHeaders = null) {
           const euiccProfile = await retrieveTelnaEuiccProfile(selectedIccid);
           const activationCode = euiccProfile?.activation_code || "";
 
-          if (!activationCode) {
+          if (isNewEsim && !activationCode) {
             throw new Error(`Telna eUICC profile missing activation_code for ${selectedIccid}`);
           }
 
@@ -1171,7 +1187,14 @@ async function handleTelnaOrderPaidWebhook(order, reqForHeaders = null) {
               country: item.title,
             });
           } else {
-            await sendTopUpEmail({ to: email, firstName, orderId });
+            await sendTopUpEmail({
+              to: email,
+              firstName,
+              orderId,
+              planName: item.variant_title,
+              country: item.title,
+              iccid: selectedIccid,
+            });
           }
 
           try {
