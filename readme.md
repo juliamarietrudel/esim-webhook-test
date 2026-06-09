@@ -118,6 +118,14 @@ To create templates in Telna after reviewing the preview:
 npm run telna:templates:create
 ```
 
+To create a controlled test batch for only a few countries:
+
+```bash
+node scripts/telna-package-templates.js --create --countries Canada,Spain,Egypt
+```
+
+The importer checks existing Telna package-template names in the configured inventory before creating. Existing matches are marked as `exists` and reused instead of duplicated. Only use `--allow-duplicates` if duplicate templates are intentional.
+
 Required environment variables for creation:
 
 ```bash
@@ -141,6 +149,31 @@ Notes:
 - Fixed-data country plans can be imported directly.
 - Maya `Unlimited` plans need a separate Telna traffic-policy decision before they can be imported safely.
 - Region plans need a confirmed list of ISO-3 countries per region before they can become Telna package templates.
+
+## Creating Shopify Products From Telna Templates
+
+After Telna templates have been created, use the generated mapping CSV to create Shopify products and variants.
+
+Preview the Shopify catalog without changing Shopify:
+
+```bash
+npm run shopify:products:preview -- --countries Canada,Spain,Egypt
+```
+
+Create/update Shopify products:
+
+```bash
+npm run shopify:products:create -- --countries Canada,Spain,Egypt
+```
+
+The Shopify importer uses:
+
+- Product title: country name, e.g. `Canada`
+- Variant title: plan, e.g. `1GB / 5 Days`
+- Variant price: Maya `RRP info`
+- Variant metafield: `custom.telna_package_template_id`
+
+This means the Shopify webhook can identify the exact Telna package template from the purchased variant.
 
 ## Shopify Order Metafields Written By The Service
 

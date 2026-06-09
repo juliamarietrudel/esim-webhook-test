@@ -6,7 +6,9 @@
   "scripts": {
     "start": "node index.js",
     "telna:templates:preview": "node scripts/telna-package-templates.js",
-    "telna:templates:create": "node scripts/telna-package-templates.js --create"
+    "telna:templates:create": "node scripts/telna-package-templates.js --create",
+    "shopify:products:preview": "node scripts/shopify-products-from-telna-templates.js",
+    "shopify:products:create": "node scripts/shopify-products-from-telna-templates.js --create"
   },
   "dependencies": {
     "dotenv": "^17.2.4",

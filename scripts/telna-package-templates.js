@@ -61,7 +61,9 @@ function parseArgs(argv) {
     limit: null,
     offset: 0,
     country: null,
+    countries: null,
     includeRegions: false,
+    allowDuplicates: false,
   };
 
   for (let i = 2; i < argv.length; i += 1) {
@@ -74,7 +76,9 @@ function parseArgs(argv) {
     else if (arg === "--limit") args.limit = Number(next), i += 1;
     else if (arg === "--offset") args.offset = Number(next), i += 1;
     else if (arg === "--country") args.country = next, i += 1;
+    else if (arg === "--countries") args.countries = next, i += 1;
     else if (arg === "--include-regions") args.includeRegions = true;
+    else if (arg === "--allow-duplicates") args.allowDuplicates = true;
     else if (arg === "--help") {
       printHelp();
       process.exit(0);
@@ -99,10 +103,12 @@ Options:
   --region-source <path>   Region CSV path. Defaults to ~/Desktop/region.csv
   --out-dir <path>         Output directory. Defaults to outputs/telna-package-templates
   --country <name>         Only process one country from the Region column
+  --countries <names>      Only process comma-separated countries, e.g. Canada,Spain,Egypt
   --limit <n>              Process at most n rows
   --offset <n>             Skip n rows after filtering
   --include-regions        Also load region.csv into a separate preview file
   --create                 POST templates to Telna instead of dry-run only
+  --allow-duplicates       Do not skip templates that already exist by name
 `);
 }
 
@@ -289,23 +295,24 @@ function prepareCountryRows(rows, sourceName) {
   });
 }
 
-async function createTemplate(prepared) {
-  if (!prepared.payload) throw new Error(prepared.error || "Missing payload");
+function telnaConfig() {
   const baseUrl = (process.env.TELNA_BASE_URL || "").replace(/\/$/, "");
   const token = process.env.TELNA_API_TOKEN;
   if (!baseUrl) throw new Error("TELNA_BASE_URL is required for --create");
   if (!token) throw new Error("TELNA_API_TOKEN is required for --create");
-  if (!prepared.payload.inventory) throw new Error("TELNA_INVENTORY_ID is required for --create");
-  if (!prepared.payload.traffic_policy) throw new Error("TELNA_TRAFFIC_POLICY_ID is required for --create");
+  return { baseUrl, token };
+}
 
-  const response = await fetch(`${baseUrl}/pcr/package-templates`, {
-    method: "POST",
+async function telnaRequest(pathname, options = {}) {
+  const { baseUrl, token } = telnaConfig();
+  const response = await fetch(`${baseUrl}${pathname}`, {
+    ...options,
     headers: {
       Accept: "application/json",
       Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
+      ...(options.body ? { "Content-Type": "application/json" } : {}),
+      ...(options.headers || {}),
     },
-    body: JSON.stringify(prepared.payload),
   });
   const text = await response.text();
   let body;
@@ -316,10 +323,91 @@ async function createTemplate(prepared) {
   }
 
   if (!response.ok) {
-    throw new Error(`Telna create failed (${response.status}): ${JSON.stringify(body)}`);
+    throw new Error(`Telna API failed (${response.status}): ${JSON.stringify(body)}`);
   }
 
   return body;
+}
+
+function normalizeName(value) {
+  return clean(value).toLowerCase();
+}
+
+function existingTemplateName(template) {
+  return (
+    template?.name ||
+    template?.package_template_name ||
+    template?.packageTemplateName ||
+    template?.package_template?.name ||
+    ""
+  );
+}
+
+function extractTemplateList(responseBody) {
+  if (Array.isArray(responseBody)) return responseBody;
+  const candidates = [
+    responseBody?.package_templates,
+    responseBody?.packageTemplates,
+    responseBody?.templates,
+    responseBody?.items,
+    responseBody?.data,
+    responseBody?.results,
+  ];
+  return candidates.find(Array.isArray) || [];
+}
+
+function extractTotal(responseBody, currentCount, offset) {
+  const total = Number(responseBody?.total ?? responseBody?.total_count ?? responseBody?.count_total);
+  if (Number.isFinite(total)) return total;
+  return offset + currentCount;
+}
+
+async function listExistingPackageTemplates({ inventory }) {
+  if (!inventory) throw new Error("TELNA_INVENTORY_ID is required for --create");
+
+  const all = [];
+  const count = 100;
+  for (let offset = 0; ; offset += count) {
+    const params = new URLSearchParams({
+      count: String(count),
+      offset: String(offset),
+      inventory: String(inventory),
+    });
+    const body = await telnaRequest(`/pcr/package-templates?${params.toString()}`);
+    const templates = extractTemplateList(body);
+    all.push(...templates);
+
+    const total = extractTotal(body, templates.length, offset);
+    if (templates.length < count || all.length >= total) break;
+  }
+  return all;
+}
+
+function buildExistingTemplateIndex(templates) {
+  const byName = new Map();
+  for (const template of templates) {
+    const name = normalizeName(existingTemplateName(template));
+    if (!name) continue;
+    if (!byName.has(name)) byName.set(name, template);
+  }
+  return byName;
+}
+
+function markExistingTemplate(row, existingTemplate) {
+  row.telna_template_id = extractTemplateId(existingTemplate);
+  row.status = "exists";
+  row.error = "Skipped because a Telna package template with this name already exists in this inventory.";
+}
+
+async function createTemplate(prepared) {
+  if (!prepared.payload) throw new Error(prepared.error || "Missing payload");
+  if (!prepared.payload.inventory) throw new Error("TELNA_INVENTORY_ID is required for --create");
+  if (!prepared.payload.traffic_policy) throw new Error("TELNA_TRAFFIC_POLICY_ID is required for --create");
+
+  return await telnaRequest("/pcr/package-templates", {
+    method: "POST",
+    body: JSON.stringify(prepared.payload),
+  });
 }
 
 function extractTemplateId(responseBody) {
@@ -337,22 +425,40 @@ async function main() {
     const requested = clean(args.country).toLowerCase();
     prepared = prepared.filter((row) => row.maya_country_or_region.toLowerCase() === requested);
   }
+  if (args.countries) {
+    const requested = new Set(args.countries.split(",").map((country) => clean(country).toLowerCase()).filter(Boolean));
+    prepared = prepared.filter((row) => requested.has(row.maya_country_or_region.toLowerCase()));
+  }
 
   prepared = prepared.slice(args.offset, args.limit ? args.offset + args.limit : undefined);
 
   const createdResponses = [];
   if (args.create) {
+    const inventory = prepared.find((row) => row.payload?.inventory)?.payload?.inventory;
+    const existingByName = args.allowDuplicates
+      ? new Map()
+      : buildExistingTemplateIndex(await listExistingPackageTemplates({ inventory }));
+
     for (const row of prepared) {
       if (row.status !== "preview") {
         console.log(`skipped ${row.name}: ${row.error}`);
         continue;
       }
+
+      const existingTemplate = existingByName.get(normalizeName(row.name));
+      if (existingTemplate) {
+        markExistingTemplate(row, existingTemplate);
+        console.log(`exists ${row.name}: ${row.telna_template_id || "unknown id"}`);
+        continue;
+      }
+
       try {
         const responseBody = await createTemplate(row);
         row.telna_template_id = extractTemplateId(responseBody);
         row.status = "created";
         row.error = "";
         createdResponses.push({ maya_id: row.maya_id, response: responseBody });
+        existingByName.set(normalizeName(row.name), responseBody);
         console.log(`created ${row.name}: ${row.telna_template_id || "unknown id"}`);
       } catch (error) {
         row.status = "error";
@@ -376,12 +482,13 @@ async function main() {
   }
 
   const unmapped = csvRows.filter((row) => row.status === "unmapped_country");
-  const unsupported = csvRows.filter((row) => row.status !== "preview" && row.status !== "created");
+  const readyStatuses = new Set(["preview", "created", "exists"]);
+  const unsupported = csvRows.filter((row) => !readyStatuses.has(row.status));
   const summary = {
     mode: args.create ? "create" : "dry-run",
     rowsPrepared: prepared.length,
     rowsWithIso3: csvRows.length - unmapped.length,
-    rowsReadyToCreate: csvRows.filter((row) => row.status === "preview" || row.status === "created").length,
+    rowsReadyToCreate: csvRows.filter((row) => readyStatuses.has(row.status)).length,
     rowsNeedingDecision: unsupported.length,
     unmappedCountries: [...new Set(unmapped.map((row) => row.maya_country_or_region))],
     statuses: csvRows.reduce((acc, row) => {
