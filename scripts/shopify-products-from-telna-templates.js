@@ -262,6 +262,39 @@ async function createVariants(productId, rows) {
   return result?.productVariants || [];
 }
 
+async function updateVariants(productId, variantRows) {
+  if (!variantRows.length) return [];
+
+  const mutation = `
+    mutation UpdateVariants($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+      productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+        productVariants {
+          id
+          title
+          selectedOptions { name value }
+        }
+        userErrors { field message }
+      }
+    }
+  `;
+
+  const variants = variantRows.map(({ variantId, row }) => ({
+    id: variantId,
+    price: money(row.rrp_price),
+    taxable: false,
+    inventoryItem: {
+      sku: sku(row.maya_country_or_region, row),
+      requiresShipping: false,
+    },
+  }));
+
+  const json = await shopifyGraphql(mutation, { productId, variants });
+  const result = json?.data?.productVariantsBulkUpdate;
+  const userErrors = result?.userErrors || [];
+  if (userErrors.length) throw new Error(userErrors[0]?.message || "Shopify productVariantsBulkUpdate failed");
+  return result?.productVariants || [];
+}
+
 async function setVariantTelnaMetafields(variantRows) {
   if (!variantRows.length) return true;
 
@@ -332,6 +365,7 @@ async function syncProduct(country, rows, { create }) {
     })
     .filter(Boolean);
 
+  await updateVariants(product.id, metafieldUpdates);
   await setVariantTelnaMetafields(metafieldUpdates);
 
   return {

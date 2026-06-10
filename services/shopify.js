@@ -329,7 +329,6 @@ export async function releaseOrderProcessingLock(orderId, token) {
 
   await setMetafields([
     { ownerId: gid, namespace: "custom", key: "telna_processing", type: "boolean", value: "false" },
-    { ownerId: gid, namespace: "custom", key: "telna_processing_token", type: "single_line_text_field", value: "" },
   ], "Failed to release Telna processing lock");
 
   return { released: true };
