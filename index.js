@@ -1081,7 +1081,12 @@ function pickBuyerFromOrder(order) {
     order?.shipping_address?.country_code ||
     "US";
 
-  return { email, firstName, lastName, countryIso2 };
+  return {
+    email: truthyEnv("SIMULATE_MISSING_CUSTOMER_EMAIL") ? "" : email,
+    firstName,
+    lastName,
+    countryIso2,
+  };
 }
 
 // -----------------------------

@@ -56,6 +56,10 @@ USAGE_ALERT_THRESHOLD_PERCENT=75
 USAGE_ALERT_TEST_MODE=false
 SIMULATE_CUSTOMER_EMAIL_FAILURE=false
 SIMULATE_FULFILLMENT_FAILURE=false
+SIMULATE_MISSING_VARIANT_TEMPLATE_ID=false
+SIMULATE_MISSING_CUSTOMER_EMAIL=false
+SIMULATE_NO_AVAILABLE_TELNA_ESIM=false
+SIMULATE_TELNA_PACKAGE_CREATE_FAILURE=false
 LOG_LEVEL=info
 ```
 
@@ -69,6 +73,10 @@ Notes:
 - `USAGE_ALERT_TEST_MODE=true` enables protected cron testing parameters such as `mock_percent_used`. Keep this disabled in production.
 - `SIMULATE_CUSTOMER_EMAIL_FAILURE=true` makes customer eSIM/top-up emails fail on purpose while keeping admin alerts available. Use only in sandbox testing.
 - `SIMULATE_FULFILLMENT_FAILURE=true` makes Shopify fulfillment fail on purpose after Telna provisioning/email. Use only in sandbox testing.
+- `SIMULATE_MISSING_VARIANT_TEMPLATE_ID=true` makes every purchased variant behave as if `custom.telna_package_template_id` were missing. Use only in sandbox testing.
+- `SIMULATE_MISSING_CUSTOMER_EMAIL=true` makes the order behave as if no customer email were available. Use only in sandbox testing.
+- `SIMULATE_NO_AVAILABLE_TELNA_ESIM=true` makes the next first-time purchase fail as if no unused ICCID were available. Use only in sandbox testing.
+- `SIMULATE_TELNA_PACKAGE_CREATE_FAILURE=true` makes Telna package creation fail before calling Telna. Use only in sandbox testing.
 
 ## Shopify Variant Setup
 
@@ -234,36 +242,49 @@ custom.usage_alerts_sent
 Use the sandbox store and Render logs to validate these before launch.
 
 1. Variant missing `custom.telna_package_template_id`
-   - Temporarily remove the metafield from one test variant.
+   - Temporarily set `SIMULATE_MISSING_VARIANT_TEMPLATE_ID=true` in Render.
+   - Redeploy/restart the web service.
    - Create a paid test order.
    - Expected: no Telna package is created, an admin alert is sent, and the order is not marked `telna_processed`.
+   - Reset `SIMULATE_MISSING_VARIANT_TEMPLATE_ID=false` after the test.
 
 2. No available Telna ICCID
-   - In sandbox, use up all clean ICCIDs or set all reusable ICCIDs to have an `ACTIVE` / `NOT_ACTIVE` package.
+   - Temporarily set `SIMULATE_NO_AVAILABLE_TELNA_ESIM=true` in Render.
+   - Redeploy/restart the web service.
    - Create a paid test order with a new customer email.
    - Expected: provisioning fails, an admin alert is sent, and the order is not marked `telna_processed`.
+   - Reset `SIMULATE_NO_AVAILABLE_TELNA_ESIM=false` after the test.
 
 3. Telna package creation error
-   - Temporarily set a test variant metafield to an invalid package template ID.
+   - Temporarily set `SIMULATE_TELNA_PACKAGE_CREATE_FAILURE=true` in Render.
+   - Redeploy/restart the web service.
    - Create a paid test order.
-   - Expected: Telna returns an error, an admin alert is sent, and the order is not marked `telna_processed`.
+   - Expected: package creation fails, an admin alert is sent, and the order is not marked `telna_processed`.
+   - Reset `SIMULATE_TELNA_PACKAGE_CREATE_FAILURE=false` after the test.
 
 4. Customer email cannot be sent
    - Temporarily set `SIMULATE_CUSTOMER_EMAIL_FAILURE=true` in a sandbox environment.
+   - Redeploy/restart the web service.
    - Create a paid test order.
    - Expected: Telna provisioning still completes, the order is marked `telna_processed` to avoid duplicate package creation, and an admin alert is sent.
+   - Reset `SIMULATE_CUSTOMER_EMAIL_FAILURE=false` after the test.
 
 5. Duplicate Shopify webhook
    - Use Shopify's webhook retry or send the same paid order payload twice.
    - Expected: one request acquires the processing lock; the other logs `locked` and does not create a second package.
 
 6. Customer without email
-   - Create a test order without customer/contact email if Shopify allows it.
+   - Temporarily set `SIMULATE_MISSING_CUSTOMER_EMAIL=true` in Render.
+   - Redeploy/restart the web service.
+   - Create a paid test order.
    - Expected: Telna provisioning completes, the order is marked `telna_processed`, and an admin alert is sent because the customer email could not be sent.
+   - Reset `SIMULATE_MISSING_CUSTOMER_EMAIL=false` after the test.
 
 7. Shopify fulfillment failure
    - Temporarily set `SIMULATE_FULFILLMENT_FAILURE=true` in a sandbox environment.
+   - Redeploy/restart the web service.
    - Expected: Telna provisioning and email still complete, an admin alert is sent, and the order is marked `telna_processed`.
+   - Reset `SIMULATE_FULFILLMENT_FAILURE=false` after the test.
 
 ## Usage Alert Cron Testing
 

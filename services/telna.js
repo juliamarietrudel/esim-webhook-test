@@ -68,6 +68,9 @@ export async function createTelnaPackage({ iccid, packageTemplateId, timeAllowan
   if (!Number.isFinite(package_template)) {
     throw new Error("createTelnaPackage: missing or invalid packageTemplateId");
   }
+  if (truthyEnv("SIMULATE_TELNA_PACKAGE_CREATE_FAILURE")) {
+    throw new Error("Simulated Telna package creation failure");
+  }
 
   const body = {
     sim,
@@ -132,6 +135,10 @@ async function hasBlockingTelnaPackages(iccid) {
 }
 
 export async function findAvailableTelnaEsim({ inventory, group } = {}) {
+  if (truthyEnv("SIMULATE_NO_AVAILABLE_TELNA_ESIM")) {
+    throw new Error("Simulated no available Telna eSIM");
+  }
+
   const allowTerminatedReuse = truthyEnv("TELNA_REUSE_TERMINATED_ESIMS");
   const simsResp = await listTelnaSims({ count: 100, offset: 0, inventory, group });
   const sims = Array.isArray(simsResp?.sims) ? simsResp.sims : [];

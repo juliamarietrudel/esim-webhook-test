@@ -19,6 +19,10 @@ async function parseJsonSafe(resp) {
   return await resp.json().catch(() => ({}));
 }
 
+function truthyEnv(name) {
+  return ["1", "true", "yes", "on"].includes(String(process.env[name] || "").trim().toLowerCase());
+}
+
 async function shopifyToken() {
   const staticToken = (process.env.API_ACCESS_TOKEN || "").trim();
   if (staticToken) return staticToken;
@@ -78,6 +82,10 @@ export async function shopifyGraphql(query, variables = {}) {
 }
 
 export async function getTelnaVariantConfig(variantId) {
+  if (truthyEnv("SIMULATE_MISSING_VARIANT_TEMPLATE_ID")) {
+    return { telnaPackageTemplateId: null, productType: null };
+  }
+
   const gid = `gid://shopify/ProductVariant/${variantId}`;
 
   const query = `
