@@ -64,6 +64,9 @@ function parseArgs(argv) {
     countries: null,
     includeRegions: false,
     allowDuplicates: false,
+    includeUnlimited: false,
+    unlimitedPolicy: "Daily - 3GB per Day, then 1Mbps",
+    unlimitedAllowanceGbPerDay: Number(process.env.TELNA_UNLIMITED_ALLOWANCE_GB_PER_DAY || 5),
   };
 
   for (let i = 2; i < argv.length; i += 1) {
@@ -79,6 +82,9 @@ function parseArgs(argv) {
     else if (arg === "--countries") args.countries = next, i += 1;
     else if (arg === "--include-regions") args.includeRegions = true;
     else if (arg === "--allow-duplicates") args.allowDuplicates = true;
+    else if (arg === "--include-unlimited") args.includeUnlimited = true;
+    else if (arg === "--unlimited-policy") args.unlimitedPolicy = next, i += 1;
+    else if (arg === "--unlimited-allowance-gb-per-day") args.unlimitedAllowanceGbPerDay = Number(next), i += 1;
     else if (arg === "--help") {
       printHelp();
       process.exit(0);
@@ -109,6 +115,14 @@ Options:
   --include-regions        Also load region.csv into a separate preview file
   --create                 POST templates to Telna instead of dry-run only
   --allow-duplicates       Do not skip templates that already exist by name
+  --include-unlimited      Include the approved unlimited policy in preview/create
+  --unlimited-policy <txt> Maya traffic policy to include for unlimited plans.
+                           Defaults to "Daily - 3GB per Day, then 1Mbps"
+  --unlimited-allowance-gb-per-day <n>
+                           Technical high-volume allowance per day. Defaults to 5
+
+Unlimited env:
+  TELNA_UNLIMITED_TRAFFIC_POLICY_ID is required when --include-unlimited is used.
 `);
 }
 
@@ -188,26 +202,68 @@ function gbToBytes(value) {
   return Math.round(gb * 1024 * 1024 * 1024);
 }
 
+function gbNumberToBytes(value) {
+  const gb = Number(value);
+  if (!Number.isFinite(gb)) return null;
+  return Math.round(gb * 1024 * 1024 * 1024);
+}
+
+function isUnlimitedData(value) {
+  return clean(value).toLowerCase() === "unlimited";
+}
+
 function daysToSeconds(value) {
   const days = Number(clean(value));
   if (!Number.isFinite(days)) return null;
   return Math.round(days * 24 * 60 * 60);
 }
 
-function buildPayload(row, iso3) {
+function daysNumber(value) {
+  const days = Number(clean(value));
+  return Number.isFinite(days) ? days : null;
+}
+
+function dayLabel(days) {
+  return days === 1 ? "1 Day" : `${days} Days`;
+}
+
+function buildPlanName(row, { isUnlimitedPlan = false } = {}) {
+  if (!isUnlimitedPlan) return clean(row.Name);
+
+  const region = clean(row.Region);
+  const days = daysNumber(row["Validity (Days)"]);
+  return `${region} Unlimited - ${dayLabel(days)}`;
+}
+
+function selectedUnlimitedTrafficPolicyId() {
+  const value = process.env.TELNA_UNLIMITED_TRAFFIC_POLICY_ID || "";
+  const policyId = Number(value);
+  return Number.isFinite(policyId) ? policyId : null;
+}
+
+function unlimitedDataBytes(row, args) {
+  const days = daysNumber(row["Validity (Days)"]);
+  const gbPerDay = Number(args.unlimitedAllowanceGbPerDay);
+  if (!Number.isFinite(days) || !Number.isFinite(gbPerDay)) return null;
+  return gbNumberToBytes(days * gbPerDay);
+}
+
+function buildPayload(row, iso3, { isUnlimitedPlan = false, dataBytes = null, args = null } = {}) {
   const inventory = process.env.TELNA_INVENTORY_ID ? Number(process.env.TELNA_INVENTORY_ID) : null;
-  const trafficPolicy = process.env.TELNA_TRAFFIC_POLICY_ID ? Number(process.env.TELNA_TRAFFIC_POLICY_ID) : null;
+  const trafficPolicy = isUnlimitedPlan
+    ? selectedUnlimitedTrafficPolicyId()
+    : (process.env.TELNA_TRAFFIC_POLICY_ID ? Number(process.env.TELNA_TRAFFIC_POLICY_ID) : null);
   const activationType = process.env.TELNA_ACTIVATION_TYPE || "AUTO";
   const activationWindowDays = Number(process.env.TELNA_ACTIVATION_TIME_ALLOWANCE_DAYS || 365);
   const availableDays = Number(process.env.TELNA_AVAILABLE_DAYS || 365);
   const now = Date.now();
 
   return {
-    name: clean(row.Name),
+    name: buildPlanName(row, { isUnlimitedPlan }),
     traffic_policy: trafficPolicy,
     supported_countries: [iso3],
     voice_usage_allowance: 0,
-    data_usage_allowance: gbToBytes(row["Data (GB)"]),
+    data_usage_allowance: dataBytes ?? gbToBytes(row["Data (GB)"]),
     sms_usage_allowance: 0,
     activation_time_allowance: activationWindowDays * 24 * 60 * 60,
     activation_type: activationType,
@@ -220,6 +276,9 @@ function buildPayload(row, iso3) {
       `Maya RRP: ${clean(row["RRP info"])}.`,
       `Wi-Fi hotspot: ${clean(row["Wi-Fi Hotspot"])}.`,
       `Maya traffic policy: ${clean(row["Traffic Policy"])}.`,
+      isUnlimitedPlan
+        ? `Unlimited import: technical allowance ${args?.unlimitedAllowanceGbPerDay || 5}GB/day with Telna traffic policy ${trafficPolicy}.`
+        : "",
     ].join(" "),
     time_allowance: {
       duration: daysToSeconds(row["Validity (Days)"]),
@@ -237,6 +296,8 @@ function toCsv(rows) {
     "iso3",
     "name",
     "data_gb",
+    "plan_kind",
+    "maya_traffic_policy",
     "validity_days",
     "data_bytes",
     "duration_seconds",
@@ -252,18 +313,36 @@ function toCsv(rows) {
   return [headers.join(","), ...rows.map((row) => headers.map((h) => quote(row[h])).join(","))].join("\n") + "\n";
 }
 
-function prepareCountryRows(rows, sourceName) {
+function prepareCountryRows(rows, sourceName, args) {
   return rows.map((row) => {
     const region = clean(row.Region);
     const iso3 = countryToIso3(region);
-    const dataBytes = gbToBytes(row["Data (GB)"]);
+    const dataIsUnlimited = isUnlimitedData(row["Data (GB)"]);
+    const mayaTrafficPolicy = clean(row["Traffic Policy"]);
+    const includeThisUnlimited = dataIsUnlimited
+      && args.includeUnlimited
+      && mayaTrafficPolicy.toLowerCase() === clean(args.unlimitedPolicy).toLowerCase();
+    const dataBytes = dataIsUnlimited
+      ? (includeThisUnlimited ? unlimitedDataBytes(row, args) : null)
+      : gbToBytes(row["Data (GB)"]);
     const durationSeconds = daysToSeconds(row["Validity (Days)"]);
-    const payload = iso3 && dataBytes && durationSeconds ? buildPayload(row, iso3) : null;
+    const payload = iso3 && dataBytes && durationSeconds
+      ? buildPayload(row, iso3, { isUnlimitedPlan: includeThisUnlimited, dataBytes, args })
+      : null;
     let status = "preview";
     let error = "";
     if (!iso3) {
       status = "unmapped_country";
       error = `Could not map '${region}' to ISO-3`;
+    } else if (dataIsUnlimited && !args.includeUnlimited) {
+      status = "unsupported_unlimited_or_data";
+      error = "Unlimited plan skipped. Re-run with --include-unlimited after Telna traffic policy is confirmed.";
+    } else if (dataIsUnlimited && !includeThisUnlimited) {
+      status = "skipped_unlimited_policy";
+      error = `Unlimited plan skipped because Maya traffic policy '${mayaTrafficPolicy}' does not match '${clean(args.unlimitedPolicy)}'.`;
+    } else if (dataIsUnlimited && !selectedUnlimitedTrafficPolicyId()) {
+      status = "missing_unlimited_traffic_policy";
+      error = "TELNA_UNLIMITED_TRAFFIC_POLICY_ID is required for included unlimited plans.";
     } else if (!dataBytes) {
       status = "unsupported_unlimited_or_data";
       error = `Cannot create a fixed Telna data allowance from Data (GB)='${clean(row["Data (GB)"])}'`;
@@ -277,8 +356,10 @@ function prepareCountryRows(rows, sourceName) {
       maya_id: clean(row.ID),
       maya_country_or_region: region,
       iso3,
-      name: clean(row.Name),
+      name: buildPlanName(row, { isUnlimitedPlan: includeThisUnlimited }),
       data_gb: clean(row["Data (GB)"]),
+      plan_kind: dataIsUnlimited ? (includeThisUnlimited ? "unlimited" : "unlimited_skipped") : "fixed",
+      maya_traffic_policy: mayaTrafficPolicy,
       validity_days: clean(row["Validity (Days)"]),
       data_bytes: dataBytes,
       duration_seconds: durationSeconds,
@@ -419,7 +500,7 @@ async function main() {
   fs.mkdirSync(args.outDir, { recursive: true });
 
   const countriesText = fs.readFileSync(args.source, "utf8");
-  let prepared = prepareCountryRows(parseCsv(countriesText), "countries");
+  let prepared = prepareCountryRows(parseCsv(countriesText), "countries", args);
 
   if (args.country) {
     const requested = clean(args.country).toLowerCase();
@@ -483,12 +564,14 @@ async function main() {
 
   const unmapped = csvRows.filter((row) => row.status === "unmapped_country");
   const readyStatuses = new Set(["preview", "created", "exists"]);
-  const unsupported = csvRows.filter((row) => !readyStatuses.has(row.status));
+  const intentionalSkipStatuses = new Set(["skipped_unlimited_policy"]);
+  const unsupported = csvRows.filter((row) => !readyStatuses.has(row.status) && !intentionalSkipStatuses.has(row.status));
   const summary = {
     mode: args.create ? "create" : "dry-run",
     rowsPrepared: prepared.length,
     rowsWithIso3: csvRows.length - unmapped.length,
     rowsReadyToCreate: csvRows.filter((row) => readyStatuses.has(row.status)).length,
+    rowsSkippedIntentionally: csvRows.filter((row) => intentionalSkipStatuses.has(row.status)).length,
     rowsNeedingDecision: unsupported.length,
     unmappedCountries: [...new Set(unmapped.map((row) => row.maya_country_or_region))],
     statuses: csvRows.reduce((acc, row) => {

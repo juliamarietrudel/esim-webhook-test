@@ -50,6 +50,8 @@ ALERT_EMAIL_TO=ops@example.com
 TELNA_GROUP_ID=...
 TELNA_DEFAULT_PACKAGE_TEMPLATE_ID=...
 TELNA_LOCK_TTL_MS=900000
+TELNA_REUSE_TERMINATED_ESIMS=false
+TELNA_BLOCKING_PACKAGE_STATUSES=ACTIVE,NOT_ACTIVE
 USAGE_ALERT_THRESHOLD_PERCENT=75
 LOG_LEVEL=info
 ```
@@ -59,6 +61,8 @@ Notes:
 - `TELNA_DEFAULT_PACKAGE_TEMPLATE_ID` is a sandbox fallback only. In production, each Shopify variant should have its own `custom.telna_package_template_id` metafield.
 - `TELNA_INVENTORY_ID` tells the service which Telna inventory to search when choosing an unused eSIM ICCID.
 - `TELNA_GROUP_ID` can narrow the search further if Telna provides separate groups/billing groups for production.
+- `TELNA_REUSE_TERMINATED_ESIMS=true` is a sandbox/testing escape hatch. When enabled, the service can reuse an eSIM that has only terminated packages. Keep this disabled in production unless Telna explicitly confirms that reusing previously assigned ICCIDs is safe for your production flow.
+- `TELNA_BLOCKING_PACKAGE_STATUSES` controls which package statuses prevent sandbox eSIM reuse when `TELNA_REUSE_TERMINATED_ESIMS=true`. The default is `ACTIVE,NOT_ACTIVE`.
 
 ## Shopify Variant Setup
 
@@ -141,14 +145,40 @@ Optional creation settings:
 TELNA_ACTIVATION_TYPE=AUTO
 TELNA_ACTIVATION_TIME_ALLOWANCE_DAYS=365
 TELNA_AVAILABLE_DAYS=365
+TELNA_UNLIMITED_TRAFFIC_POLICY_ID=1299
+TELNA_UNLIMITED_ALLOWANCE_GB_PER_DAY=5
 ```
 
 Notes:
 
 - Telna package templates do not contain Shopify pricing. Maya `WSP info` and `RRP info` are preserved in the preview/mapping files for Shopify product setup, but Telna only receives the package configuration.
 - Fixed-data country plans can be imported directly.
-- Maya `Unlimited` plans need a separate Telna traffic-policy decision before they can be imported safely.
+- Maya `Unlimited` plans are imported only when `--include-unlimited` is provided.
+- The current unlimited import keeps only Maya's `Daily - 3GB per Day, then 1Mbps` plans and intentionally skips `Unlimited LITE` / `Unlimited MAX`.
+- The unlimited import uses `TELNA_UNLIMITED_TRAFFIC_POLICY_ID` for throttling and `TELNA_UNLIMITED_ALLOWANCE_GB_PER_DAY` to create a high technical data allowance. Sheldon provided test traffic policy `1299`, described as `3GB per day at 20mbps, post this speed reduces to 1Mbps`.
+- Do not run the full `--create --include-unlimited` import until Telna confirms the API field/value required to create package templates with Location Update (`LU`) activation. The API currently returns only `activation_type: "AUTO"` even for templates that the portal labels as PDP.
 - Region plans need a confirmed list of ISO-3 countries per region before they can become Telna package templates.
+
+Preview all fixed country plans plus the approved single unlimited option:
+
+```bash
+TELNA_UNLIMITED_TRAFFIC_POLICY_ID=1299 node scripts/telna-package-templates.js --include-unlimited
+```
+
+Expected preview shape, before any LU confirmation:
+
+```text
+rowsPrepared: 4592
+rowsReadyToCreate: 3992
+rowsSkippedIntentionally: 600
+rowsNeedingDecision: 0
+```
+
+After Telna confirms the LU API field/value, update the template importer first, then create with:
+
+```bash
+TELNA_UNLIMITED_TRAFFIC_POLICY_ID=1299 node scripts/telna-package-templates.js --create --include-unlimited
+```
 
 ## Creating Shopify Products From Telna Templates
 
@@ -171,6 +201,8 @@ The Shopify importer uses:
 - Product title: country name, e.g. `Canada`
 - Variant title: plan, e.g. `1GB / 5 Days`
 - Variant price: Maya `RRP info`
+- Variant inventory: not tracked (`inventoryItem.tracked = false`) so eSIM plans are not blocked by Shopify quantity `0`
+- Variant shipping: disabled (`requiresShipping = false`)
 - Variant metafield: `custom.telna_package_template_id`
 
 This means the Shopify webhook can identify the exact Telna package template from the purchased variant.

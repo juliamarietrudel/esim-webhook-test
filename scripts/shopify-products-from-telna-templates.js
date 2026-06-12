@@ -110,19 +110,24 @@ function numberValue(value) {
   return Number.isFinite(n) ? n : 0;
 }
 
+function isUnlimitedPlan(row) {
+  return clean(row.plan_kind).toLowerCase() === "unlimited" || clean(row.data_gb).toLowerCase() === "unlimited";
+}
+
 function variantTitle(row) {
-  const data = numberValue(row.data_gb);
   const days = numberValue(row.validity_days);
-  const dataLabel = Number.isInteger(data) ? `${data}GB` : `${data}GB`;
+  const dataLabel = isUnlimitedPlan(row)
+    ? "Unlimited"
+    : `${numberValue(row.data_gb)}GB`;
   const dayLabel = days === 1 ? "1 Day" : `${days} Days`;
   return `${dataLabel} / ${dayLabel}`;
 }
 
 function sku(country, row) {
   const slug = clean(country).toUpperCase().replace(/[^A-Z0-9]+/g, "-").replace(/^-|-$/g, "");
-  const data = clean(row.data_gb).replace(/[^0-9.]+/g, "");
+  const data = isUnlimitedPlan(row) ? "UNLIMITED" : `${clean(row.data_gb).replace(/[^0-9.]+/g, "")}GB`;
   const days = clean(row.validity_days).replace(/[^0-9]+/g, "");
-  return `TELNA-${slug}-${data}GB-${days}D`;
+  return `TELNA-${slug}-${data}-${days}D`;
 }
 
 function escapeSearch(value) {
@@ -155,6 +160,7 @@ function groupRows(rows, countriesFilter, limit) {
 
   for (const [country, countryRows] of grouped.entries()) {
     countryRows.sort((a, b) => {
+      if (isUnlimitedPlan(a) !== isUnlimitedPlan(b)) return isUnlimitedPlan(a) ? 1 : -1;
       const dataDiff = numberValue(a.data_gb) - numberValue(b.data_gb);
       if (dataDiff !== 0) return dataDiff;
       return numberValue(a.validity_days) - numberValue(b.validity_days);
@@ -245,6 +251,7 @@ async function createVariants(productId, rows) {
     taxable: false,
     inventoryItem: {
       sku: sku(row.maya_country_or_region, row),
+      tracked: false,
       requiresShipping: false,
     },
     optionValues: [
@@ -284,6 +291,7 @@ async function updateVariants(productId, variantRows) {
     taxable: false,
     inventoryItem: {
       sku: sku(row.maya_country_or_region, row),
+      tracked: false,
       requiresShipping: false,
     },
   }));
@@ -336,6 +344,8 @@ async function syncProduct(country, rows, { create }) {
       variants: desired.map(({ row, title }) => ({
         title,
         price: money(row.rrp_price),
+        inventoryTracked: false,
+        requiresShipping: false,
         telnaPackageTemplateId: clean(row.telna_template_id),
       })),
     };

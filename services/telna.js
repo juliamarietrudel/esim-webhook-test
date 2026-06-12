@@ -95,7 +95,44 @@ export async function retrieveTelnaEuiccProfile(iccid) {
   return await telnaFetch(`/esim-rsp/euicc-profiles/${encodeURIComponent(cleanIccid)}`);
 }
 
+function truthyEnv(name) {
+  return ["1", "true", "yes", "on"].includes(String(process.env[name] || "").trim().toLowerCase());
+}
+
+function packageCount(packagesResp) {
+  if (Number.isFinite(Number(packagesResp?.total))) return Number(packagesResp.total);
+
+  const packages =
+    packagesResp?.packages ||
+    packagesResp?.items ||
+    packagesResp?.data ||
+    packagesResp?.results ||
+    [];
+
+  if (Array.isArray(packages)) return packages.length;
+
+  return Number(packagesResp?.count ?? 0);
+}
+
+function blockingPackageStatuses() {
+  const raw = process.env.TELNA_BLOCKING_PACKAGE_STATUSES || "ACTIVE,NOT_ACTIVE";
+  return raw
+    .split(",")
+    .map((status) => status.trim())
+    .filter(Boolean);
+}
+
+async function hasBlockingTelnaPackages(iccid) {
+  for (const status of blockingPackageStatuses()) {
+    const packagesResp = await listTelnaPackages({ sim: iccid, status, count: 1, offset: 0 });
+    if (packageCount(packagesResp) > 0) return true;
+  }
+
+  return false;
+}
+
 export async function findAvailableTelnaEsim({ inventory, group } = {}) {
+  const allowTerminatedReuse = truthyEnv("TELNA_REUSE_TERMINATED_ESIMS");
   const simsResp = await listTelnaSims({ count: 100, offset: 0, inventory, group });
   const sims = Array.isArray(simsResp?.sims) ? simsResp.sims : [];
 
@@ -110,10 +147,20 @@ export async function findAvailableTelnaEsim({ inventory, group } = {}) {
   });
 
   for (const sim of candidates) {
+    if (allowTerminatedReuse) {
+      const hasBlockingPackages = await hasBlockingTelnaPackages(sim.iccid);
+      if (!hasBlockingPackages) return sim;
+      continue;
+    }
+
     const packagesResp = await listTelnaPackages({ sim: sim.iccid, count: 1, offset: 0 });
-    const existingCount = Number(packagesResp?.total ?? packagesResp?.count ?? 0);
+    const existingCount = packageCount(packagesResp);
     if (existingCount === 0) return sim;
   }
 
-  throw new Error("No available Telna eSIM found with zero existing packages");
+  throw new Error(
+    allowTerminatedReuse
+      ? "No available Telna eSIM found without active or not-active packages"
+      : "No available Telna eSIM found with zero existing packages",
+  );
 }

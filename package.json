@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node index.js",
     "telna:templates:preview": "node scripts/telna-package-templates.js",
+    "telna:templates:preview:unlimited": "node scripts/telna-package-templates.js --include-unlimited",
     "telna:templates:create": "node scripts/telna-package-templates.js --create",
     "shopify:products:preview": "node scripts/shopify-products-from-telna-templates.js",
     "shopify:products:create": "node scripts/shopify-products-from-telna-templates.js --create"
