@@ -53,6 +53,9 @@ TELNA_LOCK_TTL_MS=900000
 TELNA_REUSE_TERMINATED_ESIMS=false
 TELNA_BLOCKING_PACKAGE_STATUSES=ACTIVE,NOT_ACTIVE
 USAGE_ALERT_THRESHOLD_PERCENT=75
+USAGE_ALERT_TEST_MODE=false
+SIMULATE_CUSTOMER_EMAIL_FAILURE=false
+SIMULATE_FULFILLMENT_FAILURE=false
 LOG_LEVEL=info
 ```
 
@@ -63,6 +66,9 @@ Notes:
 - `TELNA_GROUP_ID` can narrow the search further if Telna provides separate groups/billing groups for production.
 - `TELNA_REUSE_TERMINATED_ESIMS=true` is a sandbox/testing escape hatch. When enabled, the service can reuse an eSIM that has only terminated packages. Keep this disabled in production unless Telna explicitly confirms that reusing previously assigned ICCIDs is safe for your production flow.
 - `TELNA_BLOCKING_PACKAGE_STATUSES` controls which package statuses prevent sandbox eSIM reuse when `TELNA_REUSE_TERMINATED_ESIMS=true`. The default is `ACTIVE,NOT_ACTIVE`.
+- `USAGE_ALERT_TEST_MODE=true` enables protected cron testing parameters such as `mock_percent_used`. Keep this disabled in production.
+- `SIMULATE_CUSTOMER_EMAIL_FAILURE=true` makes customer eSIM/top-up emails fail on purpose while keeping admin alerts available. Use only in sandbox testing.
+- `SIMULATE_FULFILLMENT_FAILURE=true` makes Shopify fulfillment fail on purpose after Telna provisioning/email. Use only in sandbox testing.
 
 ## Shopify Variant Setup
 
@@ -221,6 +227,94 @@ custom.telna_esims_json
 custom.telna_processed
 custom.telna_processed_at
 custom.usage_alerts_sent
+```
+
+## Error Case Test Plan
+
+Use the sandbox store and Render logs to validate these before launch.
+
+1. Variant missing `custom.telna_package_template_id`
+   - Temporarily remove the metafield from one test variant.
+   - Create a paid test order.
+   - Expected: no Telna package is created, an admin alert is sent, and the order is not marked `telna_processed`.
+
+2. No available Telna ICCID
+   - In sandbox, use up all clean ICCIDs or set all reusable ICCIDs to have an `ACTIVE` / `NOT_ACTIVE` package.
+   - Create a paid test order with a new customer email.
+   - Expected: provisioning fails, an admin alert is sent, and the order is not marked `telna_processed`.
+
+3. Telna package creation error
+   - Temporarily set a test variant metafield to an invalid package template ID.
+   - Create a paid test order.
+   - Expected: Telna returns an error, an admin alert is sent, and the order is not marked `telna_processed`.
+
+4. Customer email cannot be sent
+   - Temporarily set `SIMULATE_CUSTOMER_EMAIL_FAILURE=true` in a sandbox environment.
+   - Create a paid test order.
+   - Expected: Telna provisioning still completes, the order is marked `telna_processed` to avoid duplicate package creation, and an admin alert is sent.
+
+5. Duplicate Shopify webhook
+   - Use Shopify's webhook retry or send the same paid order payload twice.
+   - Expected: one request acquires the processing lock; the other logs `locked` and does not create a second package.
+
+6. Customer without email
+   - Create a test order without customer/contact email if Shopify allows it.
+   - Expected: Telna provisioning completes, the order is marked `telna_processed`, and an admin alert is sent because the customer email could not be sent.
+
+7. Shopify fulfillment failure
+   - Temporarily set `SIMULATE_FULFILLMENT_FAILURE=true` in a sandbox environment.
+   - Expected: Telna provisioning and email still complete, an admin alert is sent, and the order is marked `telna_processed`.
+
+## Usage Alert Cron Testing
+
+The production cron command should be:
+
+```bash
+curl -fsS "https://YOUR_RENDER_URL/cron/check-usage?token=$CRON_SECRET"
+```
+
+Dry-run without sending emails:
+
+```bash
+curl -fsS "https://YOUR_RENDER_URL/cron/check-usage?token=$CRON_SECRET&dry_run=1"
+```
+
+To test alert logic without consuming real eSIM data, temporarily set:
+
+```bash
+USAGE_ALERT_TEST_MODE=true
+USAGE_ALERT_THRESHOLD_PERCENT=75
+```
+
+Then call:
+
+```bash
+curl -fsS "https://YOUR_RENDER_URL/cron/check-usage?token=$CRON_SECRET&dry_run=1&mock_percent_used=80"
+```
+
+Expected:
+
+- `wouldAlert: true` for eligible packages.
+- No email is sent when `dry_run=1`.
+
+To send one real test alert email:
+
+```bash
+curl -fsS "https://YOUR_RENDER_URL/cron/check-usage?token=$CRON_SECRET&mock_percent_used=80"
+```
+
+Then run the same command again.
+
+Expected:
+
+- First run sends the usage alert and writes `custom.usage_alerts_sent` on the Shopify order.
+- Second run increments `alreadySent` and does not send the email again.
+
+After testing, set:
+
+```bash
+USAGE_ALERT_TEST_MODE=false
+USAGE_ALERT_THRESHOLD_PERCENT=75
 ```
 
 It also writes temporary lock metafields while an order is being processed:

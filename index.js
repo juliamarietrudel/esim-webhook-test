@@ -45,6 +45,10 @@ const log = {
   error: (...a) => console.error(...a),
 };
 
+function truthyEnv(name) {
+  return ["1", "true", "yes", "on"].includes(String(process.env[name] || "").trim().toLowerCase());
+}
+
 // -----------------------------
 // Usage alert settings (CRON)
 // -----------------------------
@@ -333,6 +337,10 @@ async function sendEsimEmail({
     console.warn("⚠️ No customer email found on order; cannot send eSIM email.");
     return false;
   }
+  if (truthyEnv("SIMULATE_CUSTOMER_EMAIL_FAILURE")) {
+    console.warn("🧪 Simulating customer eSIM email failure.");
+    return false;
+  }
   if (!activationCode) {
     console.warn("⚠️ Missing activation_code; cannot generate QR email.");
     return false;
@@ -388,6 +396,9 @@ function formatTopUpEmailHtml({
   validityDays,
   dataQuotaMb,
   iccid,
+  activationCode,
+  manualCode,
+  qrDataUrl,
 }) {
   const safeName = (firstName || "").trim() || "client(e)";
 
@@ -399,10 +410,59 @@ function formatTopUpEmailHtml({
       ? `<tr><td style="padding:10px 0; font-size:14px; color:#334155;"><b>${label} :</b> ${esc(value)}</td></tr>`
       : "";
 
+  const codeRow = (label, value) =>
+    value
+      ? `<tr>
+          <td style="padding:10px 0; font-size:13px; color:#334155;">
+            <b>${label} :</b>
+            <code style="background:#F1F5F9; padding:4px 8px; border-radius:6px; display:inline-block; word-break:break-all;">
+              ${esc(value)}
+            </code>
+          </td>
+        </tr>`
+      : "";
+
   const links = {
     conso: "https://quebecesim.ca/pages/comment-suivre-ma-consommation",
     contact: "https://quebecesim.ca/pages/contactez-nous",
   };
+
+  const qrSection =
+    qrDataUrl || activationCode
+      ? `
+              <h2 style="font-size: 16px; color:#0F172A; margin: 20px 0 10px;">Besoin de réinstaller votre eSIM ?</h2>
+
+              <table width="100%" cellpadding="0" cellspacing="0" border="0"
+                style="background:#F8FAFC; border: 1px solid #E5E7EB; border-radius: 14px; padding: 18px; margin: 12px 0 22px;">
+                <tr>
+                  <td style="font-size: 13px; color:#475569; line-height:1.45;">
+                    Si votre eSIM Québec eSIM est déjà installée sur votre téléphone, vous n’avez pas besoin de scanner le code QR à nouveau.
+                    Cette section est seulement là si vous devez réinstaller l’eSIM ou l’ajouter sur un nouvel appareil compatible.
+                  </td>
+                </tr>
+              </table>
+
+              ${
+                qrDataUrl
+                  ? `<div style="text-align:center; margin: 18px 0 22px;">
+                      <img
+                        src="${qrDataUrl}"
+                        alt="Scanner pour réinstaller l’eSIM"
+                        width="150"
+                        style="border-radius:12px; border:1px solid #E5E7EB;"
+                      />
+                      <p style="font-size:12px; color:#64748B; margin-top:8px;">
+                        Code QR de votre eSIM existante
+                      </p>
+                    </div>`
+                  : ""
+              }
+
+              <table width="100%" cellpadding="0" cellspacing="0" border="0"
+                style="background:#FFFFFF; border: 1px solid #E5E7EB; border-radius: 14px; padding: 18px; margin-bottom: 18px;">
+                ${codeRow("Code d’activation manuel", manualCode || activationCode)}
+              </table>`
+      : "";
 
   return `<!DOCTYPE html>
 <html lang="fr">
@@ -452,7 +512,8 @@ function formatTopUpEmailHtml({
               </p>
 
               <p style="font-size: 15px; color:#334155; margin: 0 0 18px;">
-                Nous vous confirmons que votre nouveau forfait a bien été ajouté à votre eSIM déjà installée.
+                Nous vous confirmons que votre nouveau forfait a bien été ajouté à votre eSIM Québec eSIM existante.
+                Vous n’avez normalement rien à réinstaller : gardez simplement votre eSIM active et utilisez-la comme d’habitude.
               </p>
 
               <table width="100%" cellpadding="0" cellspacing="0" border="0"
@@ -481,6 +542,8 @@ function formatTopUpEmailHtml({
                 ${bullet("Vérifiez que votre mode avion est <b>DÉSACTIVÉ</b>.")}
                 ${bullet(`Vous pouvez suivre votre consommation ici : <a href="${links.conso}" style="color:#0CA3EC; text-decoration:none;">Comment suivre ma consommation ?</a>`)}
               </ul>
+
+              ${qrSection}
 
               <p style="font-size: 14px; color:#334155; margin: 18px 0 0;">
                 Nous vous souhaitons une excellente fin de séjour !
@@ -525,6 +588,8 @@ async function sendTopUpEmail({
   validityDays,
   dataQuotaMb,
   iccid,
+  activationCode,
+  manualCode,
 }) {
   if (!emailEnabled) {
     console.log("ℹ️ Skipping top-up email (email not configured).");
@@ -534,10 +599,17 @@ async function sendTopUpEmail({
     console.warn("⚠️ No recipient email; cannot send top-up email.");
     return false;
   }
+  if (truthyEnv("SIMULATE_CUSTOMER_EMAIL_FAILURE")) {
+    console.warn("🧪 Simulating customer top-up email failure.");
+    return false;
+  }
 
   const subject = orderId
     ? `Forfait ajouté à votre eSIM (Commande #${orderId})`
     : "Forfait ajouté à votre eSIM";
+
+  const qrBase64 = activationCode ? await generateQrPngBase64(activationCode) : null;
+  const qrDataUrl = qrBase64 ? `data:image/png;base64,${qrBase64}` : "";
 
   const html = formatTopUpEmailHtml({
     firstName,
@@ -546,6 +618,9 @@ async function sendTopUpEmail({
     validityDays,
     dataQuotaMb,
     iccid,
+    activationCode,
+    manualCode,
+    qrDataUrl,
   });
 
   const result = await resend.emails.send({
@@ -554,6 +629,7 @@ async function sendTopUpEmail({
     bcc: INTERNAL_BCC,
     subject,
     html,
+    ...(qrBase64 ? { attachments: [{ filename: "esim-qr.png", content: qrBase64 }] } : {}),
   });
 
   if (result?.error) {
@@ -790,6 +866,11 @@ app.get("/cron/check-usage", async (req, res) => {
   const secret = (process.env.CRON_SECRET || "").trim();
   const token = String(req.query.token || "").trim();
   const dryRun = String(req.query.dry_run || "").trim() === "1";
+  const usageAlertTestMode = truthyEnv("USAGE_ALERT_TEST_MODE");
+  const mockPercentUsed = usageAlertTestMode ? Number(req.query.mock_percent_used) : NaN;
+  const mockPackageStatus = usageAlertTestMode
+    ? String(req.query.mock_package_status || "ACTIVE").trim().toUpperCase()
+    : "";
 
   if (!secret) {
     console.error("❌ Missing CRON_SECRET env var");
@@ -808,6 +889,7 @@ app.get("/cron/check-usage", async (req, res) => {
     const summary = {
       ok: true,
       dryRun,
+      testMode: usageAlertTestMode,
       thresholdPercent: Number.isFinite(USAGE_ALERT_THRESHOLD_PERCENT) ? USAGE_ALERT_THRESHOLD_PERCENT : 75,
       ordersChecked: orders.length,
       packagesChecked: 0,
@@ -850,9 +932,9 @@ app.get("/cron/check-usage", async (req, res) => {
           continue;
         }
 
-        const packageStatus = String(telnaPackage?.status || "").toUpperCase();
+        let packageStatus = String(telnaPackage?.status || "").toUpperCase();
         const totalBytes = Number(telnaPackage?.package_template?.data_usage_allowance || 0);
-        const remainingBytes = Number(telnaPackage?.data_usage_remaining ?? totalBytes);
+        let remainingBytes = Number(telnaPackage?.data_usage_remaining ?? totalBytes);
 
         if (!Number.isFinite(totalBytes) || totalBytes <= 0) {
           log.warn("⚠️ Invalid Telna data allowance", { orderId, iccid, packageId, totalBytes });
@@ -864,6 +946,12 @@ app.get("/cron/check-usage", async (req, res) => {
             reason: "invalid_data_allowance",
           });
           continue;
+        }
+
+        if (usageAlertTestMode && Number.isFinite(mockPercentUsed)) {
+          const safePercent = Math.max(0, Math.min(100, mockPercentUsed));
+          remainingBytes = Math.round(totalBytes * ((100 - safePercent) / 100));
+          packageStatus = mockPackageStatus || "ACTIVE";
         }
 
         const usedBytes = Math.max(0, totalBytes - Math.max(0, remainingBytes));
@@ -1134,20 +1222,22 @@ async function handleTelnaOrderPaidWebhook(order, reqForHeaders = null) {
       }
 
       for (let q = 0; q < qty; q++) {
-        const forceNewEsim = ["new_esim", "nouvelle_esim"].includes(productType);
-        let selectedIccid = forceNewEsim ? null : customerTelnaIccid;
+        let selectedIccid = null;
         let isNewEsim = false;
 
-        if (!selectedIccid) {
-          const available = await findAvailableTelnaEsim({
-            inventory: TELNA_INVENTORY_ID,
-            group: TELNA_GROUP_ID,
-          });
-          selectedIccid = available.iccid;
-          isNewEsim = true;
-        }
-
         try {
+          const forceNewEsim = ["new_esim", "nouvelle_esim"].includes(productType);
+          selectedIccid = forceNewEsim ? null : customerTelnaIccid;
+
+          if (!selectedIccid) {
+            const available = await findAvailableTelnaEsim({
+              inventory: TELNA_INVENTORY_ID,
+              group: TELNA_GROUP_ID,
+            });
+            selectedIccid = available.iccid;
+            isNewEsim = true;
+          }
+
           const telnaPackage = await createTelnaPackage({
             iccid: selectedIccid,
             packageTemplateId,
@@ -1173,8 +1263,9 @@ async function handleTelnaOrderPaidWebhook(order, reqForHeaders = null) {
             customerTelnaIccid = selectedIccid;
           }
 
+          let customerEmailSent = false;
           if (isNewEsim) {
-            await sendEsimEmail({
+            customerEmailSent = await sendEsimEmail({
               to: email,
               firstName,
               orderId,
@@ -1187,17 +1278,40 @@ async function handleTelnaOrderPaidWebhook(order, reqForHeaders = null) {
               country: item.title,
             });
           } else {
-            await sendTopUpEmail({
+            customerEmailSent = await sendTopUpEmail({
               to: email,
               firstName,
               orderId,
               planName: item.variant_title,
               country: item.title,
               iccid: selectedIccid,
+              activationCode,
+              manualCode: activationCode,
+            });
+          }
+
+          if (!customerEmailSent) {
+            await sendAdminAlertEmail({
+              subject: `Customer eSIM email was not sent (Order #${orderId})`,
+              html: `
+                <p>Telna provisioning succeeded, but the customer email was not sent.</p>
+                <p>The order is still marked processed to avoid duplicate package creation.</p>
+                <ul>
+                  <li><b>Order ID</b>: ${esc(orderId)}</li>
+                  <li><b>Email</b>: ${esc(email || "")}</li>
+                  <li><b>ICCID</b>: ${esc(selectedIccid || "")}</li>
+                  <li><b>Package ID</b>: ${esc(telnaPackage?.id || "")}</li>
+                  <li><b>Package Template ID</b>: ${esc(packageTemplateId)}</li>
+                  <li><b>Email type</b>: ${esc(isNewEsim ? "new_esim" : "top_up")}</li>
+                </ul>
+              `,
             });
           }
 
           try {
+            if (truthyEnv("SIMULATE_FULFILLMENT_FAILURE")) {
+              throw new Error("Simulated Shopify fulfillment failure");
+            }
             const fulfillment = await fulfillShopifyOrder(orderId, { notifyCustomer: false });
             console.log("Shopify fulfillment result:", { orderId, fulfillment });
           } catch (fulfillmentErr) {
