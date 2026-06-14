@@ -483,7 +483,9 @@ function markExistingTemplate(row, existingTemplate) {
 async function createTemplate(prepared) {
   if (!prepared.payload) throw new Error(prepared.error || "Missing payload");
   if (!prepared.payload.inventory) throw new Error("TELNA_INVENTORY_ID is required for --create");
-  if (!prepared.payload.traffic_policy) throw new Error("TELNA_TRAFFIC_POLICY_ID is required for --create");
+  if (prepared.plan_kind === "unlimited" && !prepared.payload.traffic_policy) {
+    throw new Error("TELNA_UNLIMITED_TRAFFIC_POLICY_ID is required for unlimited templates");
+  }
 
   return await telnaRequest("/pcr/package-templates", {
     method: "POST",

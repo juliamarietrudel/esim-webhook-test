@@ -113,6 +113,20 @@ value: new_esim
 
 Use `new_esim` only if a variant should force a brand-new eSIM even for a returning customer.
 
+## Telna Production Decisions
+
+Confirmed operating assumptions for the Shopify integration:
+
+- Production eSIM ICCIDs are purchased/provisioned in Telna before they can be sold. The webhook does not create ICCIDs; it selects an available ICCID from the configured Telna inventory.
+- Use the current Telna inventory ID for production unless Telna later provisions a separate production inventory.
+- First purchase for a customer: assign one available ICCID, create the purchased package on it, retrieve the activation code, and email the QR code.
+- Returning customer/top-up: reuse the same Shopify customer `custom.telna_iccid` and create the new package on that same ICCID.
+- Telna confirmed there is no known limit to how many packages can be assigned to one ICCID over time.
+- Do not reuse an ICCID that previously belonged to another customer, even if all packages are terminated.
+- Telna does not automatically notify when ICCID inventory is low; monitor available ICCIDs operationally.
+- Keep old/inactive ICCIDs for about one year, then delete/purge inactive eSIMs after review.
+- `TELNA_REUSE_TERMINATED_ESIMS=true` is sandbox-only and should be disabled before production.
+
 ## Importing Maya Plans As Telna Package Templates
 
 The Maya CSV files can be converted into Telna package-template payloads with:
@@ -150,7 +164,6 @@ Required environment variables for creation:
 TELNA_API_TOKEN=...
 TELNA_BASE_URL=https://developer-api.telna.com/v2.1
 TELNA_INVENTORY_ID=...
-TELNA_TRAFFIC_POLICY_ID=...
 ```
 
 Optional creation settings:
@@ -159,6 +172,7 @@ Optional creation settings:
 TELNA_ACTIVATION_TYPE=AUTO
 TELNA_ACTIVATION_TIME_ALLOWANCE_DAYS=365
 TELNA_AVAILABLE_DAYS=365
+TELNA_TRAFFIC_POLICY_ID=...
 TELNA_UNLIMITED_TRAFFIC_POLICY_ID=1299
 TELNA_UNLIMITED_ALLOWANCE_GB_PER_DAY=5
 ```
@@ -166,7 +180,7 @@ TELNA_UNLIMITED_ALLOWANCE_GB_PER_DAY=5
 Notes:
 
 - Telna package templates do not contain Shopify pricing. Maya `WSP info` and `RRP info` are preserved in the preview/mapping files for Shopify product setup, but Telna only receives the package configuration.
-- Fixed-data country plans can be imported directly.
+- Fixed-data country plans can be imported directly. `TELNA_TRAFFIC_POLICY_ID` is optional for fixed plans; leave it empty unless Telna confirms a standard throttling policy should apply.
 - Maya `Unlimited` plans are imported only when `--include-unlimited` is provided.
 - The current unlimited import keeps only Maya's `Daily - 3GB per Day, then 1Mbps` plans and intentionally skips `Unlimited LITE` / `Unlimited MAX`.
 - The unlimited import uses `TELNA_UNLIMITED_TRAFFIC_POLICY_ID` for throttling and `TELNA_UNLIMITED_ALLOWANCE_GB_PER_DAY` to create a high technical data allowance. Sheldon provided test traffic policy `1299`, described as `3GB per day at 20mbps, post this speed reduces to 1Mbps`.
