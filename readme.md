@@ -164,6 +164,7 @@ Required environment variables for creation:
 TELNA_API_TOKEN=...
 TELNA_BASE_URL=https://developer-api.telna.com/v2.1
 TELNA_INVENTORY_ID=...
+TELNA_TRAFFIC_POLICY_ID=1296
 ```
 
 Optional creation settings:
@@ -172,7 +173,6 @@ Optional creation settings:
 TELNA_ACTIVATION_TYPE=AUTO
 TELNA_ACTIVATION_TIME_ALLOWANCE_DAYS=365
 TELNA_AVAILABLE_DAYS=365
-TELNA_TRAFFIC_POLICY_ID=...
 TELNA_UNLIMITED_TRAFFIC_POLICY_ID=1299
 TELNA_UNLIMITED_ALLOWANCE_GB_PER_DAY=5
 ```
@@ -180,7 +180,7 @@ TELNA_UNLIMITED_ALLOWANCE_GB_PER_DAY=5
 Notes:
 
 - Telna package templates do not contain Shopify pricing. Maya `WSP info` and `RRP info` are preserved in the preview/mapping files for Shopify product setup, but Telna only receives the package configuration.
-- Fixed-data country plans can be imported directly. `TELNA_TRAFFIC_POLICY_ID` is optional for fixed plans; leave it empty unless Telna confirms a standard throttling policy should apply.
+- Fixed-data country plans use `TELNA_TRAFFIC_POLICY_ID=1296`, which applies a 20 Mbps cap while the package allowance controls the data limit.
 - Maya `Unlimited` plans are imported only when `--include-unlimited` is provided.
 - The current unlimited import keeps only Maya's `Daily - 3GB per Day, then 1Mbps` plans and intentionally skips `Unlimited LITE` / `Unlimited MAX`.
 - The unlimited import uses `TELNA_UNLIMITED_TRAFFIC_POLICY_ID` for throttling and `TELNA_UNLIMITED_ALLOWANCE_GB_PER_DAY` to create a high technical data allowance. Sheldon provided test traffic policy `1299`, described as `3GB per day at 20mbps, post this speed reduces to 1Mbps`.

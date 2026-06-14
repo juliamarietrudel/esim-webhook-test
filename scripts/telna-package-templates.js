@@ -486,6 +486,9 @@ async function createTemplate(prepared) {
   if (prepared.plan_kind === "unlimited" && !prepared.payload.traffic_policy) {
     throw new Error("TELNA_UNLIMITED_TRAFFIC_POLICY_ID is required for unlimited templates");
   }
+  if (prepared.plan_kind !== "unlimited" && !prepared.payload.traffic_policy) {
+    throw new Error("TELNA_TRAFFIC_POLICY_ID is required for fixed-data templates");
+  }
 
   return await telnaRequest("/pcr/package-templates", {
     method: "POST",
