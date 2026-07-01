@@ -322,9 +322,13 @@ async function setVariantTelnaMetafields(variantRows) {
     value: clean(row.telna_template_id),
   }));
 
-  const json = await shopifyGraphql(mutation, { metafields });
-  const userErrors = json?.data?.metafieldsSet?.userErrors || [];
-  if (userErrors.length) throw new Error(userErrors[0]?.message || "Failed to set Telna variant metafield");
+  const chunkSize = 25;
+  for (let i = 0; i < metafields.length; i += chunkSize) {
+    const chunk = metafields.slice(i, i + chunkSize);
+    const json = await shopifyGraphql(mutation, { metafields: chunk });
+    const userErrors = json?.data?.metafieldsSet?.userErrors || [];
+    if (userErrors.length) throw new Error(userErrors[0]?.message || "Failed to set Telna variant metafield");
+  }
   return true;
 }
 

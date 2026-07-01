@@ -140,29 +140,37 @@ export async function findAvailableTelnaEsim({ inventory, group } = {}) {
   }
 
   const allowTerminatedReuse = truthyEnv("TELNA_REUSE_TERMINATED_ESIMS");
-  const simsResp = await listTelnaSims({ count: 100, offset: 0, inventory, group });
-  const sims = Array.isArray(simsResp?.sims) ? simsResp.sims : [];
+  const pageSize = 100;
+  let offset = 0;
 
-  const candidates = sims.filter((sim) => {
-    const iccid = String(sim?.iccid || "").trim();
-    const simType = String(sim?.sim_type || "").trim().toLowerCase();
-    const status = String(sim?.sim_status || "").trim().toLowerCase();
+  while (true) {
+    const simsResp = await listTelnaSims({ count: pageSize, offset, inventory, group });
+    const sims = Array.isArray(simsResp?.sims) ? simsResp.sims : [];
+    const candidates = sims.filter((sim) => {
+      const iccid = String(sim?.iccid || "").trim();
+      const simType = String(sim?.sim_type || "").trim().toLowerCase();
+      const status = String(sim?.sim_status || "").trim().toLowerCase();
 
-    if (!iccid) return false;
-    if (simType !== "esim") return false;
-    return ["pre-service", "pre_service", "available", "in_stock", "released"].includes(status);
-  });
+      if (!iccid) return false;
+      if (simType !== "esim") return false;
+      return ["pre-service", "pre_service", "available", "in_stock", "released"].includes(status);
+    });
 
-  for (const sim of candidates) {
-    if (allowTerminatedReuse) {
-      const hasBlockingPackages = await hasBlockingTelnaPackages(sim.iccid);
-      if (!hasBlockingPackages) return sim;
-      continue;
+    for (const sim of candidates) {
+      if (allowTerminatedReuse) {
+        const hasBlockingPackages = await hasBlockingTelnaPackages(sim.iccid);
+        if (!hasBlockingPackages) return sim;
+        continue;
+      }
+
+      const packagesResp = await listTelnaPackages({ sim: sim.iccid, count: 1, offset: 0 });
+      const existingCount = packageCount(packagesResp);
+      if (existingCount === 0) return sim;
     }
 
-    const packagesResp = await listTelnaPackages({ sim: sim.iccid, count: 1, offset: 0 });
-    const existingCount = packageCount(packagesResp);
-    if (existingCount === 0) return sim;
+    const total = Number(simsResp?.total);
+    offset += sims.length;
+    if (sims.length < pageSize || (Number.isFinite(total) && offset >= total)) break;
   }
 
   throw new Error(
