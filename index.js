@@ -1199,6 +1199,9 @@ async function handleTelnaOrderPaidWebhook(order, reqForHeaders = null) {
       const cfg = await getTelnaVariantConfig(variantId);
       const packageTemplateId = cfg?.telnaPackageTemplateId;
       const productType = cfg?.productType;
+      const purchaseType = cfg?.purchaseType;
+      const selectedOptions = Array.isArray(cfg?.selectedOptions) ? cfg.selectedOptions : [];
+      const variantSku = cfg?.sku || null;
 
       console.log(`Telna item #${i + 1}:`, {
         title: item.title,
@@ -1207,6 +1210,9 @@ async function handleTelnaOrderPaidWebhook(order, reqForHeaders = null) {
         quantity: qty,
         telna_package_template_id: packageTemplateId,
         product_type: productType,
+        purchase_type: purchaseType,
+        selected_options: selectedOptions,
+        sku: variantSku,
       });
 
       if (!packageTemplateId) {
@@ -1231,16 +1237,43 @@ async function handleTelnaOrderPaidWebhook(order, reqForHeaders = null) {
         let isNewEsim = false;
 
         try {
-          const forceNewEsim = ["new_esim", "nouvelle_esim"].includes(productType);
-          selectedIccid = forceNewEsim ? null : customerTelnaIccid;
+          const explicitPurchaseType = purchaseType || null;
 
-          if (!selectedIccid) {
+          if (explicitPurchaseType === "top_up") {
+            if (customerTelnaIccid) {
+              selectedIccid = customerTelnaIccid;
+              isNewEsim = false;
+            } else {
+              console.warn("Customer selected Recharge, but no existing Telna ICCID was found. Creating a new eSIM instead.", {
+                orderId,
+                variantId,
+              });
+              const available = await findAvailableTelnaEsim({
+                inventory: TELNA_INVENTORY_ID,
+                group: TELNA_GROUP_ID,
+              });
+              selectedIccid = available.iccid;
+              isNewEsim = true;
+            }
+          } else if (explicitPurchaseType === "new_esim") {
             const available = await findAvailableTelnaEsim({
               inventory: TELNA_INVENTORY_ID,
               group: TELNA_GROUP_ID,
             });
             selectedIccid = available.iccid;
             isNewEsim = true;
+          } else {
+            // Backward-compatible fallback for older Shopify products without the
+            // "Type de forfait" option: existing customer ICCID means top-up.
+            selectedIccid = customerTelnaIccid;
+            if (!selectedIccid) {
+              const available = await findAvailableTelnaEsim({
+                inventory: TELNA_INVENTORY_ID,
+                group: TELNA_GROUP_ID,
+              });
+              selectedIccid = available.iccid;
+              isNewEsim = true;
+            }
           }
 
           const telnaPackage = await createTelnaPackage({
@@ -1261,11 +1294,20 @@ async function handleTelnaOrderPaidWebhook(order, reqForHeaders = null) {
             packageTemplateId,
             activationCode,
             euiccState: euiccProfile?.state,
+            type: isNewEsim ? "new_esim" : "top_up",
+            country: item.title,
+            planName: item.variant_title,
+            variantId,
           });
 
           if (isNewEsim && shopifyCustomerId && !customerTelnaIccid) {
             await saveTelnaIccidToShopifyCustomer(shopifyCustomerId, selectedIccid);
             customerTelnaIccid = selectedIccid;
+          } else if (isNewEsim && shopifyCustomerId && customerTelnaIccid) {
+            console.log("Customer already has a saved Telna ICCID; keeping it as the default top-up target.", {
+              customerTelnaIccid,
+              newIccid: selectedIccid,
+            });
           }
 
           let customerEmailSent = false;

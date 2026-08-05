@@ -81,9 +81,44 @@ export async function shopifyGraphql(query, variables = {}) {
   return json;
 }
 
+function normalizeShopifyOption(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+function inferPurchaseTypeFromVariant({ selectedOptions = [], sku = "", productType = "" } = {}) {
+  const explicitProductType = normalizeShopifyOption(productType);
+  if (["new_esim", "nouvelle_esim"].includes(explicitProductType)) return "new_esim";
+  if (["top_up", "topup", "recharge"].includes(explicitProductType)) return "top_up";
+
+  const typeOption = selectedOptions.find((option) => {
+    const name = normalizeShopifyOption(option?.name);
+    return ["type_de_forfait", "type_forfait", "forfait_type", "plan_type"].includes(name);
+  });
+
+  const typeValue = normalizeShopifyOption(typeOption?.value);
+  if (typeValue.includes("recharge") || typeValue.includes("topup") || typeValue.includes("top_up")) {
+    return "top_up";
+  }
+  if (typeValue.includes("nouvelle") || typeValue.includes("new") || typeValue.includes("esim")) {
+    return "new_esim";
+  }
+
+  const cleanSku = normalizeShopifyOption(sku);
+  if (cleanSku.includes("topup") || cleanSku.includes("top_up") || cleanSku.includes("recharge")) return "top_up";
+  if (cleanSku.includes("new") || cleanSku.includes("nouvelle")) return "new_esim";
+
+  return null;
+}
+
 export async function getTelnaVariantConfig(variantId) {
   if (truthyEnv("SIMULATE_MISSING_VARIANT_TEMPLATE_ID")) {
-    return { telnaPackageTemplateId: null, productType: null };
+    return { telnaPackageTemplateId: null, productType: null, purchaseType: null, selectedOptions: [], sku: null };
   }
 
   const gid = `gid://shopify/ProductVariant/${variantId}`;
@@ -91,6 +126,8 @@ export async function getTelnaVariantConfig(variantId) {
   const query = `
     query ($id: ID!) {
       productVariant(id: $id) {
+        sku
+        selectedOptions { name value }
         telnaPackageTemplateId: metafield(namespace: "custom", key: "telna_package_template_id") { value }
         productType: metafield(namespace: "custom", key: "type_de_produit") { value }
       }
@@ -99,11 +136,14 @@ export async function getTelnaVariantConfig(variantId) {
 
   const json = await shopifyGraphql(query, { id: gid });
   const variant = json?.data?.productVariant;
+  const selectedOptions = Array.isArray(variant?.selectedOptions) ? variant.selectedOptions : [];
+  const sku = (variant?.sku || "").trim() || null;
   const telnaPackageTemplateId =
     (variant?.telnaPackageTemplateId?.value || process.env.TELNA_DEFAULT_PACKAGE_TEMPLATE_ID || "").trim() || null;
   const productType = (variant?.productType?.value || "").trim().toLowerCase() || null;
+  const purchaseType = inferPurchaseTypeFromVariant({ selectedOptions, sku, productType });
 
-  return { telnaPackageTemplateId, productType };
+  return { telnaPackageTemplateId, productType, purchaseType, selectedOptions, sku };
 }
 
 export async function getTelnaIccidFromShopifyCustomer(shopifyCustomerId) {
@@ -140,6 +180,29 @@ export async function saveTelnaIccidToShopifyCustomer(shopifyCustomerId, iccid) 
   return true;
 }
 
+async function getTelnaProvisioningRecordsFromOrder(orderId) {
+  if (!orderId) return [];
+
+  const gid = `gid://shopify/Order/${orderId}`;
+  const query = `
+    query ($id: ID!) {
+      order(id: $id) {
+        telnaEsimsJson: metafield(namespace: "custom", key: "telna_esims_json") { value }
+      }
+    }
+  `;
+
+  try {
+    const json = await shopifyGraphql(query, { id: gid });
+    const raw = json?.data?.order?.telnaEsimsJson?.value || "";
+    const parsed = JSON.parse(raw || "[]");
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (e) {
+    console.warn("Could not read existing telna_esims_json before appending:", e?.message || e);
+    return [];
+  }
+}
+
 export async function getTelnaOrderProcessedFlag(orderId) {
   const gid = `gid://shopify/Order/${orderId}`;
   const query = `
@@ -171,12 +234,33 @@ export async function markTelnaOrderProcessed(orderId) {
   return true;
 }
 
+function uniqueNonEmpty(values) {
+  return [...new Set((values || [])
+    .map((value) => String(value || "").trim())
+    .filter(Boolean))];
+}
+
+function formatTelnaRecordSummary(record, index) {
+  const type = String(record?.type || "").trim() === "top_up" ? "Recharge" : "Nouvelle eSIM";
+  const country = String(record?.country || "").trim() || "Destination inconnue";
+  const planName = String(record?.plan_name || record?.planName || "").trim() || "Forfait inconnu";
+  const iccid = String(record?.iccid || "").trim() || "ICCID manquant";
+  const packageId = String(record?.package_id || record?.packageId || "").trim() || "Package ID manquant";
+  const templateId = String(record?.package_template_id || record?.packageTemplateId || "").trim() || "Template ID manquant";
+
+  return `${index + 1}. ${type} | ${country} | ${planName} | ICCID: ${iccid} | Package: ${packageId} | Template: ${templateId}`;
+}
+
 export async function saveTelnaProvisioningToOrder(orderId, {
   iccid,
   packageId,
   packageTemplateId,
   activationCode,
   euiccState,
+  type,
+  country,
+  planName,
+  variantId,
 } = {}) {
   if (!orderId) throw new Error("saveTelnaProvisioningToOrder: missing orderId");
 
@@ -194,14 +278,30 @@ export async function saveTelnaProvisioningToOrder(orderId, {
   add("telna_activation_code", activationCode, "multi_line_text_field");
   add("telna_euicc_state", euiccState);
 
-  add("telna_esims_json", JSON.stringify([
-    {
-      iccid: String(iccid || "").trim() || null,
-      package_id: String(packageId || "").trim() || null,
-      package_template_id: String(packageTemplateId || "").trim() || null,
-      euicc_state: String(euiccState || "").trim() || null,
-    },
-  ]), "multi_line_text_field");
+  const currentRecords = await getTelnaProvisioningRecordsFromOrder(orderId);
+  const nextRecord = {
+    type: String(type || "").trim() || null,
+    country: String(country || "").trim() || null,
+    plan_name: String(planName || "").trim() || null,
+    variant_id: String(variantId || "").trim() || null,
+    iccid: String(iccid || "").trim() || null,
+    package_id: String(packageId || "").trim() || null,
+    package_template_id: String(packageTemplateId || "").trim() || null,
+    euicc_state: String(euiccState || "").trim() || null,
+  };
+  const records = currentRecords.filter((record) => {
+    if (!nextRecord.package_id) return true;
+    return String(record?.package_id || record?.packageId || "") !== nextRecord.package_id;
+  });
+  records.push(nextRecord);
+
+  const lineBreak = "\n";
+
+  add("telna_esims_json", JSON.stringify(records), "multi_line_text_field");
+  add("telna_iccids", uniqueNonEmpty(records.map((record) => record?.iccid)).join(lineBreak), "multi_line_text_field");
+  add("telna_package_ids", uniqueNonEmpty(records.map((record) => record?.package_id || record?.packageId)).join(lineBreak), "multi_line_text_field");
+  add("telna_package_template_ids", uniqueNonEmpty(records.map((record) => record?.package_template_id || record?.packageTemplateId)).join(lineBreak), "multi_line_text_field");
+  add("telna_items_summary", records.map(formatTelnaRecordSummary).join(lineBreak), "multi_line_text_field");
 
   if (!metafields.length) return true;
   await setMetafields(metafields, "Failed to write Telna provisioning metafields");
