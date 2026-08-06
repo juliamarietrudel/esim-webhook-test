@@ -137,7 +137,7 @@ function escapeSearch(value) {
 function productDescription(country) {
   return [
     `<p>Travel eSIM data plan for ${country}.</p>`,
-    "<p>If you already have a Telna eSIM from us, this purchase will be added as a top-up to your existing eSIM. If this is your first purchase, we will email your QR code after payment.</p>",
+    "<p>Si vous possédez déjà une eSIM de chez nous, cet achat sera ajouté à votre eSIM existante sous forme de recharge. S’il s’agit de votre premier achat, nous vous enverrons votre code QR par courriel après la confirmation de votre paiement.</p>",
   ].join("\n");
 }
 
