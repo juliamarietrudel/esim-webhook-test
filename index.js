@@ -523,7 +523,7 @@ function formatTopUpEmailHtml({
                 ${row("Validité", validityDays ? `${validityDays} jours` : "")}
                 ${row("Données", dataQuotaMb ? `${dataQuotaMb} Mo` : "")}
                 ${row("ICCID", iccid)}
-                <tr><td style="padding:10px 0; font-size:14px; color:#334155;"><b>Activation :</b> le forfait s’activera automatiquement selon les règles de votre forfait Telna.</td></tr>
+                <tr><td style="padding:10px 0; font-size:14px; color:#334155;"><b>Activation :</b> le forfait s’activera automatiquement selon les règles de votre forfait Québec eSIM.</td></tr>
               </table>
 
               <table width="100%" cellpadding="0" cellspacing="0" border="0"
