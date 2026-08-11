@@ -1022,6 +1022,14 @@ app.get("/cron/check-usage", async (req, res) => {
               log.warn(
                 `⚠️ Telna usage alert triggered (${percentUsed}%) but no customer email could be resolved. Order ${orderId}`
               );
+              summary.skipped.push({
+                orderId,
+                iccid,
+                packageId,
+                packageStatus,
+                percentUsed,
+                reason: "missing_telna_customer_email_metafield",
+              });
             } else {
               try {
                 await sendUsageAlertEmail({
@@ -1298,6 +1306,8 @@ async function handleTelnaOrderPaidWebhook(order, reqForHeaders = null) {
             country: item.title,
             planName: item.variant_title,
             variantId,
+            customerEmail: email,
+            customerFirstName: firstName,
           });
 
           if (isNewEsim && shopifyCustomerId && !customerTelnaIccid) {

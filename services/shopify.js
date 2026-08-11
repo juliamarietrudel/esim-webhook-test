@@ -261,6 +261,8 @@ export async function saveTelnaProvisioningToOrder(orderId, {
   country,
   planName,
   variantId,
+  customerEmail,
+  customerFirstName,
 } = {}) {
   if (!orderId) throw new Error("saveTelnaProvisioningToOrder: missing orderId");
 
@@ -277,6 +279,8 @@ export async function saveTelnaProvisioningToOrder(orderId, {
   add("telna_package_template_id", packageTemplateId);
   add("telna_activation_code", activationCode, "multi_line_text_field");
   add("telna_euicc_state", euiccState);
+  add("telna_customer_email", customerEmail);
+  add("telna_customer_first_name", customerFirstName);
 
   const currentRecords = await getTelnaProvisioningRecordsFromOrder(orderId);
   const nextRecord = {
@@ -530,8 +534,8 @@ export async function getOrdersWithTelnaPackages({ daysBack = 365 } = {}) {
           node {
             id
             name
-            email
-            customer { firstName email }
+            telnaCustomerEmail: metafield(namespace: "custom", key: "telna_customer_email") { value }
+            telnaCustomerFirstName: metafield(namespace: "custom", key: "telna_customer_first_name") { value }
             telnaProcessed: metafield(namespace: "custom", key: "telna_processed") { value }
             telnaIccid: metafield(namespace: "custom", key: "telna_iccid") { value }
             telnaPackageId: metafield(namespace: "custom", key: "telna_package_id") { value }
@@ -553,8 +557,8 @@ export async function getOrdersWithTelnaPackages({ daysBack = 365 } = {}) {
     .map(({ node }) => {
       const orderId = String(node?.id || "").split("/").pop();
       const orderName = String(node?.name || "").trim();
-      const email = String(node?.email || node?.customer?.email || "").trim();
-      const firstName = String(node?.customer?.firstName || "").trim();
+      const email = String(node?.telnaCustomerEmail?.value || "").trim();
+      const firstName = String(node?.telnaCustomerFirstName?.value || "").trim();
 
       const telnaProcessed = String(node?.telnaProcessed?.value || "").trim().toLowerCase() === "true";
       if (!telnaProcessed) return null;
