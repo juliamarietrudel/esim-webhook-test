@@ -840,7 +840,7 @@ app.get("/test-email", async (_req, res) => {
 
     const result = await resend.emails.send({
       from: emailFrom, // must be a verified sender/domain in Resend
-      to: "julia-marie@thewebix.ca",
+      to: "juliamarietrudel@icloud.com",
       subject: "Resend test",
       html: "<p>Email works 🎉</p>",
     });
