@@ -93,12 +93,31 @@ function normalizeShopifyOption(value) {
 
 function inferPurchaseTypeFromVariant({ selectedOptions = [], sku = "", productType = "" } = {}) {
   const explicitProductType = normalizeShopifyOption(productType);
-  if (["new_esim", "nouvelle_esim"].includes(explicitProductType)) return "new_esim";
-  if (["top_up", "topup", "recharge"].includes(explicitProductType)) return "top_up";
+  if (
+    explicitProductType.includes("recharge") ||
+    explicitProductType.includes("topup") ||
+    explicitProductType.includes("top_up")
+  ) {
+    return "top_up";
+  }
+  if (
+    explicitProductType.includes("forfait") ||
+    explicitProductType.includes("new_esim") ||
+    explicitProductType.includes("nouvelle_esim")
+  ) {
+    return "new_esim";
+  }
 
   const typeOption = selectedOptions.find((option) => {
     const name = normalizeShopifyOption(option?.name);
-    return ["type_de_forfait", "type_forfait", "forfait_type", "plan_type"].includes(name);
+    return [
+      "type_de_forfait",
+      "types_de_forfaits",
+      "type_forfait",
+      "types_forfaits",
+      "forfait_type",
+      "plan_type",
+    ].includes(name);
   });
 
   const typeValue = normalizeShopifyOption(typeOption?.value);
