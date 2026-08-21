@@ -11,6 +11,7 @@ dotenv.config({ path: ".env.telna", override: false });
 import {
   getTelnaVariantConfig,
   getTelnaIccidFromShopifyCustomer,
+  getTelnaProvisioningHistoryForCustomer,
   saveTelnaIccidToShopifyCustomer,
   getTelnaOrderProcessedFlag,
   markTelnaOrderProcessed,
@@ -47,6 +48,72 @@ const log = {
 
 function truthyEnv(name) {
   return ["1", "true", "yes", "on"].includes(String(process.env[name] || "").trim().toLowerCase());
+}
+
+
+function normalizeDestination(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+function selectTopUpTargetIccid({ requestedCountry, currentOrderRecords = [], customerHistoryRecords = [], customerTelnaIccid = null } = {}) {
+  const requested = normalizeDestination(requestedCountry);
+  const allRecords = [
+    ...(Array.isArray(currentOrderRecords) ? [...currentOrderRecords].reverse() : []),
+    ...(Array.isArray(customerHistoryRecords) ? customerHistoryRecords : []),
+  ].filter((record) => String(record?.iccid || "").trim());
+
+  const sameDestination = allRecords.find((record) => {
+    return requested && normalizeDestination(record?.country) === requested;
+  });
+  if (sameDestination) {
+    return {
+      iccid: String(sameDestination.iccid).trim(),
+      reason: "same_destination_history",
+      matchedCountry: sameDestination.country || null,
+      matchedOrderId: sameDestination.orderId || null,
+      matchedOrderName: sameDestination.orderName || null,
+    };
+  }
+
+  const latestNewEsim = allRecords.find((record) => String(record?.type || "").trim() === "new_esim");
+  if (latestNewEsim) {
+    return {
+      iccid: String(latestNewEsim.iccid).trim(),
+      reason: "latest_new_esim_history",
+      matchedCountry: latestNewEsim.country || null,
+      matchedOrderId: latestNewEsim.orderId || null,
+      matchedOrderName: latestNewEsim.orderName || null,
+    };
+  }
+
+  const latestAnyEsim = allRecords[0];
+  if (latestAnyEsim) {
+    return {
+      iccid: String(latestAnyEsim.iccid).trim(),
+      reason: "latest_any_telna_history",
+      matchedCountry: latestAnyEsim.country || null,
+      matchedOrderId: latestAnyEsim.orderId || null,
+      matchedOrderName: latestAnyEsim.orderName || null,
+    };
+  }
+
+  if (customerTelnaIccid) {
+    return {
+      iccid: String(customerTelnaIccid).trim(),
+      reason: "customer_default_iccid",
+      matchedCountry: null,
+      matchedOrderId: null,
+      matchedOrderName: null,
+    };
+  }
+
+  return null;
 }
 
 // -----------------------------
@@ -1189,12 +1256,20 @@ async function handleTelnaOrderPaidWebhook(order, reqForHeaders = null) {
     const items = Array.isArray(order?.line_items) ? order.line_items : [];
     const shopifyCustomerId = order?.customer?.id || order?.customer_id || null;
     let customerTelnaIccid = null;
+    let customerTelnaHistory = [];
+    const currentOrderTelnaRecords = [];
 
     if (shopifyCustomerId) {
       try {
         customerTelnaIccid = await getTelnaIccidFromShopifyCustomer(shopifyCustomerId);
       } catch (e) {
         console.error("Could not read customer telna_iccid:", e?.message || e);
+      }
+
+      try {
+        customerTelnaHistory = await getTelnaProvisioningHistoryForCustomer(shopifyCustomerId);
+      } catch (e) {
+        console.error("Could not read customer Telna provisioning history:", e?.message || e);
       }
     }
 
@@ -1248,9 +1323,26 @@ async function handleTelnaOrderPaidWebhook(order, reqForHeaders = null) {
           const explicitPurchaseType = purchaseType || null;
 
           if (explicitPurchaseType === "top_up") {
-            if (customerTelnaIccid) {
-              selectedIccid = customerTelnaIccid;
+            const topUpTarget = selectTopUpTargetIccid({
+              requestedCountry: item.title,
+              currentOrderRecords: currentOrderTelnaRecords,
+              customerHistoryRecords: customerTelnaHistory,
+              customerTelnaIccid,
+            });
+
+            if (topUpTarget?.iccid) {
+              selectedIccid = topUpTarget.iccid;
               isNewEsim = false;
+              console.log("Selected Telna ICCID for recharge.", {
+                orderId,
+                variantId,
+                requestedCountry: item.title,
+                selectedIccid,
+                reason: topUpTarget.reason,
+                matchedCountry: topUpTarget.matchedCountry,
+                matchedOrderId: topUpTarget.matchedOrderId,
+                matchedOrderName: topUpTarget.matchedOrderName,
+              });
             } else {
               console.warn("Customer selected Recharge, but no existing Telna ICCID was found. Creating a new eSIM instead.", {
                 orderId,
@@ -1296,7 +1388,7 @@ async function handleTelnaOrderPaidWebhook(order, reqForHeaders = null) {
             throw new Error(`Telna eUICC profile missing activation_code for ${selectedIccid}`);
           }
 
-          await saveTelnaProvisioningToOrder(orderId, {
+          const provisioningRecord = {
             iccid: selectedIccid,
             packageId: telnaPackage?.id,
             packageTemplateId,
@@ -1308,6 +1400,20 @@ async function handleTelnaOrderPaidWebhook(order, reqForHeaders = null) {
             variantId,
             customerEmail: email,
             customerFirstName: firstName,
+          };
+
+          await saveTelnaProvisioningToOrder(orderId, provisioningRecord);
+          currentOrderTelnaRecords.push({
+            type: provisioningRecord.type,
+            country: provisioningRecord.country,
+            planName: provisioningRecord.planName,
+            variantId: provisioningRecord.variantId,
+            iccid: provisioningRecord.iccid,
+            packageId: provisioningRecord.packageId,
+            packageTemplateId: provisioningRecord.packageTemplateId,
+            orderId,
+            orderName: order?.name || null,
+            createdAt: new Date().toISOString(),
           });
 
           if (isNewEsim && shopifyCustomerId && !customerTelnaIccid) {

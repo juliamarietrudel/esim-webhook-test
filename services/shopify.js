@@ -199,6 +199,76 @@ export async function saveTelnaIccidToShopifyCustomer(shopifyCustomerId, iccid) 
   return true;
 }
 
+
+function parseTelnaOrderRecords(node) {
+  const recordsFromJson = parseJsonArray(node?.telnaEsimsJson?.value)
+    .map((record) => ({
+      type: String(record?.type || "").trim() || null,
+      country: String(record?.country || "").trim() || null,
+      planName: String(record?.plan_name || record?.planName || "").trim() || null,
+      variantId: String(record?.variant_id || record?.variantId || "").trim() || null,
+      iccid: String(record?.iccid || "").trim() || null,
+      packageId: String(record?.package_id || record?.packageId || "").trim() || null,
+      packageTemplateId: String(record?.package_template_id || record?.packageTemplateId || "").trim() || null,
+      orderId: String(node?.id || "").split("/").pop() || null,
+      orderName: String(node?.name || "").trim() || null,
+      createdAt: String(node?.createdAt || "").trim() || null,
+    }))
+    .filter((record) => record.iccid);
+
+  if (recordsFromJson.length) return recordsFromJson;
+
+  const singleIccid = String(node?.telnaIccid?.value || "").trim();
+  if (!singleIccid) return [];
+
+  return [{
+    type: null,
+    country: null,
+    planName: null,
+    variantId: null,
+    iccid: singleIccid,
+    packageId: String(node?.telnaPackageId?.value || "").trim() || null,
+    packageTemplateId: String(node?.telnaPackageTemplateId?.value || "").trim() || null,
+    orderId: String(node?.id || "").split("/").pop() || null,
+    orderName: String(node?.name || "").trim() || null,
+    createdAt: String(node?.createdAt || "").trim() || null,
+  }];
+}
+
+export async function getTelnaProvisioningHistoryForCustomer(shopifyCustomerId, { first = 50 } = {}) {
+  if (!shopifyCustomerId) return [];
+
+  const gid = `gid://shopify/Customer/${shopifyCustomerId}`;
+  const query = `
+    query CustomerTelnaHistory($id: ID!, $first: Int!) {
+      customer(id: $id) {
+        orders(first: $first, sortKey: CREATED_AT, reverse: true) {
+          edges {
+            node {
+              id
+              name
+              createdAt
+              telnaProcessed: metafield(namespace: "custom", key: "telna_processed") { value }
+              telnaIccid: metafield(namespace: "custom", key: "telna_iccid") { value }
+              telnaPackageId: metafield(namespace: "custom", key: "telna_package_id") { value }
+              telnaPackageTemplateId: metafield(namespace: "custom", key: "telna_package_template_id") { value }
+              telnaEsimsJson: metafield(namespace: "custom", key: "telna_esims_json") { value }
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  const json = await shopifyGraphql(query, { id: gid, first });
+  const edges = json?.data?.customer?.orders?.edges || [];
+
+  return edges.flatMap(({ node }) => {
+    const processed = String(node?.telnaProcessed?.value || "").trim().toLowerCase() === "true";
+    return processed ? parseTelnaOrderRecords(node) : [];
+  });
+}
+
 async function getTelnaProvisioningRecordsFromOrder(orderId) {
   if (!orderId) return [];
 
@@ -320,7 +390,7 @@ export async function saveTelnaProvisioningToOrder(orderId, {
 
   const lineBreak = "\n";
 
-  add("telna_esims_json", JSON.stringify(records), "multi_line_text_field");
+  add("telna_esims_json", JSON.stringify(records), "json");
   add("telna_iccids", uniqueNonEmpty(records.map((record) => record?.iccid)).join(lineBreak), "multi_line_text_field");
   add("telna_package_ids", uniqueNonEmpty(records.map((record) => record?.package_id || record?.packageId)).join(lineBreak), "multi_line_text_field");
   add("telna_package_template_ids", uniqueNonEmpty(records.map((record) => record?.package_template_id || record?.packageTemplateId)).join(lineBreak), "multi_line_text_field");
