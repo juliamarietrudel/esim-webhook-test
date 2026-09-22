@@ -317,6 +317,7 @@ function formatEsimEmailHtml({
               <ul style="margin:0 0 18px 18px; padding:0;">
                 ${bullet("Il est préférable d’installer vos eSIM <b>avant votre départ</b>. Les forfaits débutent à la première connexion au réseau de destination. Si votre forfait inclut le Canada, celui-ci débutera le jour de l’installation.")}
                 ${bullet("Une connexion <b>Wi-Fi stable</b> est requise lors de l’installation (aucune installation possible sur le Wi-Fi d’un bateau de croisière).")}
+                ${bullet("Pour tous les appareils <b>ANDROID</b>, il est important de créer le Nom du Point (APN) <b>globaldata</b> afin que votre connexion fonctionne. Vous retrouverez cette étape dans nos procédures d’installation en cliquant les liens en bas de ce courriel. Si vous constatez que l’APN <b>globaldata</b> est déjà créé, assurez-vous qu’il soit bien sélectionné.")}
                 ${bullet("Message d’erreur « eSIM non compatible » : votre appareil est probablement verrouillé par votre fournisseur. Veuillez le contacter pour le déverrouiller.")}
                 ${bullet(`Message d’erreur « Impossible d’activer l’eSIM » (iPhone) : votre eSIM est probablement bien installée. Consultez : <a href="${links.erreurs}" style="color:#0CA3EC; text-decoration:none;">Un message d’erreur s’affiche ?</a>`)}
                 ${bullet("Avant de monter à bord de votre vol, désactivez votre carte SIM principale et activez votre eSIM à destination.")}
@@ -1095,7 +1096,7 @@ app.get("/cron/check-usage", async (req, res) => {
                 packageId,
                 packageStatus,
                 percentUsed,
-                reason: "missing_telna_customer_email_metafield",
+                reason: "missing_customer_email",
               });
             } else {
               try {
