@@ -623,8 +623,6 @@ export async function getOrdersWithTelnaPackages({ daysBack = 365 } = {}) {
           node {
             id
             name
-            email
-            customer { email }
             telnaCustomerEmail: metafield(namespace: "custom", key: "telna_customer_email") { value }
             telnaCustomerFirstName: metafield(namespace: "custom", key: "telna_customer_first_name") { value }
             telnaProcessed: metafield(namespace: "custom", key: "telna_processed") { value }
@@ -648,11 +646,9 @@ export async function getOrdersWithTelnaPackages({ daysBack = 365 } = {}) {
     .map(({ node }) => {
       const orderId = String(node?.id || "").split("/").pop();
       const orderName = String(node?.name || "").trim();
-      // Resolve the current Shopify address on every check so corrections also
-      // apply to existing packages; the metafield is only a legacy fallback.
-      const email = [node?.customer?.email, node?.email, node?.telnaCustomerEmail?.value]
-        .map((value) => String(value || "").trim())
-        .find(Boolean) || "";
+      // This app cannot read protected Shopify email fields. Use the saved
+      // recipient; email corrections must also update this order metafield.
+      const email = String(node?.telnaCustomerEmail?.value || "").trim();
       const firstName = String(node?.telnaCustomerFirstName?.value || "").trim();
 
       const telnaProcessed = String(node?.telnaProcessed?.value || "").trim().toLowerCase() === "true";
