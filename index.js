@@ -729,8 +729,8 @@ async function sendUsageAlertEmail({
 
   const safeName = (firstName || "").trim() || "there";
   const subject = orderId
-    ? `Data usage alert (Order #${orderId})`
-    : "Data usage alert";
+    ? `Alerte de consommation de données (Commande #${orderId})`
+    : "Alerte de consommation de données";
 
   const html = `<!DOCTYPE html>
 <html lang="fr">
